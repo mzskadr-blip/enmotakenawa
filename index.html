@@ -1,512 +1,1091 @@
-import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-app.js';
-import {
-  getFirestore, doc, onSnapshot, runTransaction, updateDoc
-} from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-firestore.js';
-
-import { firebaseConfig, isFirebaseConfigured } from './firebase-config.js';
-import {
-  CARD_DEFS, GAME_CONFIG, createInitialBoard, createShuffledDeck
-} from './cards.js';
-import {
-  hexToPixel, hexKey, getValidPlacements, hasAnyPlayableCard,
-  detectMainRoadLoops, detectCompletedPonds
-} from './hex.js';
-import { renderCardInnerSVG, createCardPreviewSVG, HEX_POINTS } from './renderer.js';
-
-// Firebase 初期化
-let db = null;
-if (isFirebaseConfigured()) {
-  const app = initializeApp(firebaseConfig);
-  db = getFirestore(app);
-} else {
-  document.getElementById('firebase-warning').classList.remove('hidden');
-}
-
-// ローカル状態
-const local = {
-  mode: 'online', // 'online' | 'offline'
-  roomId: null,
-  playerId: sessionStorage.getItem('enmo_pid') || ('p_' + Math.random().toString(36).slice(2, 10)),
-  nickname: '',
-  gameState: null,
-  unsub: null,
-  selectedHandIdx: null,
-  currentRot: 0,
-  pendingSlot: null, // { q, r }
-  panX: 0,
-  panY: 0,
-  zoom: 1.15,
-  isDragging: false,
-  dragMoved: false,
-  lastMouse: { x: 0, y: 0 },
-  resultShown: false
-};
-sessionStorage.setItem('enmo_pid', local.playerId);
-
-// DOM参照
-const $ = id => document.getElementById(id);
-
-// --- ロビー操作 ---
-$('random-room-btn').onclick = () => {
-  $('room-id-input').value = String(Math.floor(1000 + Math.random() * 9000));
-};
-
-$('start-offline-btn').onclick = () => {
-  const name = $('nickname-input').value.trim() || 'プレイヤー1';
-  local.mode = 'offline';
-  local.nickname = name;
-  const deck = createShuffledDeck();
-  const hand = deck.splice(0, GAME_CONFIG.INITIAL_HAND_SIZE);
-  local.gameState = {
-    status: 'playing',
-    hostId: local.playerId,
-    players: [{ id: local.playerId, name, hand }],
-    turnIndex: 0,
-    phase: 'draw',
-    turnCount: 1,
-    deck,
-    board: createInitialBoard(),
-    smallLoopCount: 0,
-    completedPonds: 0,
-    winLoopTiles: [],
-    logs: ['オフライン（1人プレイ）を開始しました！']
-  };
-  enterGameScreen();
-  renderAll();
-};
-
-$('join-online-btn').onclick = async () => {
-  if (!db) return alert('firebase-config.js を設定してからオンライン参加してください。');
-  const name = $('nickname-input').value.trim();
-  const roomId = $('room-id-input').value.trim();
-  if (!name) return alert('ニックネームを入力してください。');
-  if (!/^\d{4}$/.test(roomId)) return alert('4桁の数字でルームIDを入力してください。');
-
-  local.mode = 'online';
-  local.nickname = name;
-  local.roomId = roomId;
-
-  const roomRef = doc(db, 'rooms', roomId);
-  try {
-    await runTransaction(db, async (tx) => {
-      const snap = await tx.get(roomRef);
-      if (!snap.exists()) {
-        tx.set(roomRef, {
-          status: 'lobby',
-          hostId: local.playerId,
-          players: [{ id: local.playerId, name, hand: [] }],
-          turnIndex: 0,
-          phase: 'draw',
-          turnCount: 1,
-          deck: [],
-          board: createInitialBoard(),
-          smallLoopCount: 0,
-          completedPonds: 0,
-          winLoopTiles: [],
-          logs: [`${name} がルーム ${roomId} を作成しました。`]
-        });
-      } else {
-        const data = snap.data();
-        const exists = data.players.some(p => p.id === local.playerId);
-        if (!exists) {
-          if (data.status !== 'lobby') throw new Error('このルームはすでにゲーム進行中です。');
-          if (data.players.length >= GAME_CONFIG.MAX_PLAYERS) throw new Error('満員（最大8人）です。');
-          data.players.push({ id: local.playerId, name, hand: [] });
-          data.logs = [...(data.logs || []), `${name} が参加しました。`].slice(-30);
-          tx.update(roomRef, { players: data.players, logs: data.logs });
-        }
-      }
-    });
-
-    if (local.unsub) local.unsub();
-    local.unsub = onSnapshot(roomRef, (snap) => {
-      if (!snap.exists()) return;
-      local.gameState = snap.data();
-      if (local.gameState.status === 'lobby') {
-        renderWaitingRoom();
-      } else {
-        if ($('game-screen').classList.contains('hidden')) enterGameScreen();
-        renderAll();
-      }
-    });
-  } catch (err) {
-    alert(err.message);
-  }
-};
-
-$('start-online-game-btn').onclick = async () => {
-  const state = local.gameState;
-  const deck = createShuffledDeck();
-  const players = state.players.map(p => ({
-    ...p,
-    hand: deck.splice(0, GAME_CONFIG.INITIAL_HAND_SIZE)
-  }));
-  await saveState({
-    status: 'playing',
-    players,
-    deck,
-    board: createInitialBoard(),
-    turnIndex: 0,
-    phase: 'draw',
-    turnCount: 1,
-    smallLoopCount: 0,
-    completedPonds: 0,
-    winLoopTiles: [],
-    logs: [...(state.logs || []), 'ゲーム開始！まずは山札から1枚引きましょう。'].slice(-30)
-  });
-};
-
-function renderWaitingRoom() {
-  const s = local.gameState;
-  $('waiting-room').classList.remove('hidden');
-  $('wait-room-code').textContent = local.roomId;
-  $('waiting-players-list').innerHTML = s.players
-    .map((p, i) => `<li>${i === 0 ? '👑 ' : ''}${escapeHtml(p.name)}</li>`)
-    .join('');
-  const isHost = s.hostId === local.playerId;
-  $('start-online-game-btn').classList.toggle('hidden', !isHost);
-  $('waiting-host-msg').classList.toggle('hidden', isHost);
-}
-
-// --- 状態更新ヘルパー ---
-async function saveState(patch) {
-  Object.assign(local.gameState, patch);
-  if (local.mode === 'online') {
-    await updateDoc(doc(db, 'rooms', local.roomId), patch);
-  } else {
-    renderAll();
-  }
-}
-
-function enterGameScreen() {
-  $('lobby-screen').classList.add('hidden');
-  $('game-screen').classList.remove('hidden');
-  $('room-badge').textContent = local.mode === 'online' ? `ルーム: ${local.roomId}` : 'オフライン';
-  resetView();
-}
-
-// --- ターン進行ロジック ---
-function isMyTurn() {
-  const s = local.gameState;
-  if (!s || s.status !== 'playing') return false;
-  return s.players[s.turnIndex]?.id === local.playerId;
-}
-
-$('draw-btn').onclick = async () => {
-  if (!isMyTurn()) return;
-  const s = local.gameState;
-  if (s.phase !== 'draw') return;
-
-  const deck = [...s.deck];
-  const players = structuredClone(s.players);
-  const me = players[s.turnIndex];
-  const logs = [...(s.logs || [])];
-
-  if (deck.length > 0) {
-    const drawn = deck.pop();
-    me.hand.push(drawn);
-    logs.push(`${me.name} がカードを1枚引きました。`);
-  }
-
-  await saveState({
-    deck,
-    players,
-    phase: 'place',
-    logs: logs.slice(-30)
-  });
-};
-
-$('rotate-btn').onclick = () => rotateSelected();
-window.addEventListener('keydown', (e) => {
-  if ((e.key === 'r' || e.key === 'R') && !$('game-screen').classList.contains('hidden')) {
-    rotateSelected();
-  }
-});
-
-function rotateSelected() {
-  if (local.selectedHandIdx === null) return;
-  local.currentRot = (local.currentRot + 1) % 6;
-  local.pendingSlot = null;
-  $('confirm-bar').classList.add('hidden');
-  renderAll();
-}
-
-$('confirm-place-btn').onclick = async () => {
-  if (!isMyTurn() || !local.pendingSlot || local.selectedHandIdx === null) return;
-  const s = local.gameState;
-  const players = structuredClone(s.players);
-  const me = players[s.turnIndex];
-  const cardType = me.hand.splice(local.selectedHandIdx, 1)[0];
-
-  const board = { ...s.board };
-  const { q, r } = local.pendingSlot;
-  board[hexKey(q, r)] = { type: cardType, rot: local.currentRot, placedBy: me.name };
-
-  local.selectedHandIdx = null;
-  local.currentRot = 0;
-  local.pendingSlot = null;
-  $('confirm-bar').classList.add('hidden');
-
-  const loops = detectMainRoadLoops(board);
-  const completedPonds = detectCompletedPonds(board);
-  const logs = [...(s.logs || []), `${me.name} が「${CARD_DEFS[cardType].name}」を配置しました。`];
-  if (loops.smallLoopCount > s.smallLoopCount) logs.push('✨ 小さなループが完成しました！');
-  if (completedPonds > s.completedPonds) logs.push('💧 新しい池が完成しました！');
-
-  // 勝利判定
-  if (loops.bigLoop) {
-    logs.push(`🎉 ${GAME_CONFIG.BIG_LOOP_MIN_TILES}枚以上の大きな輪が完成！全員の勝利！`);
-    await saveState({
-      board, players, status: 'won', winLoopTiles: loops.bigLoop,
-      smallLoopCount: loops.smallLoopCount, completedPonds, logs: logs.slice(-30)
-    });
-    return;
-  }
-
-  await advanceTurnOrCheckLoss(board, players, s.deck, loops.smallLoopCount, completedPonds, logs);
-};
-
-$('cancel-place-btn').onclick = () => {
-  local.pendingSlot = null;
-  $('confirm-bar').classList.add('hidden');
-  renderBoard();
-};
-
-$('skip-btn').onclick = async () => {
-  if (!isMyTurn()) return;
-  const s = local.gameState;
-  const me = s.players[s.turnIndex];
-  const logs = [...(s.logs || []), `${me.name} は出せる場所がなくスキップしました。`];
-  await advanceTurnOrCheckLoss(s.board, s.players, s.deck, s.smallLoopCount, s.completedPonds, logs);
-};
-
-async function advanceTurnOrCheckLoss(board, players, deck, smallLoopCount, completedPonds, logs) {
-  const s = local.gameState;
-  // 山札が0枚で、全プレイヤーの誰の手札も配置できないならゲームオーバー
-  if (deck.length === 0) {
-    const anyoneCanPlay = players.some(p => hasAnyPlayableCard(board, p.hand));
-    if (!anyoneCanPlay) {
-      logs.push('💔 山札が尽き、誰も出せるカードがなくなりました…ゲームオーバー。');
-      await saveState({
-        board, players, status: 'lost', smallLoopCount, completedPonds, logs: logs.slice(-30)
-      });
-      return;
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>縁もたけな輪 Ver.0.1</title>
+  <style>
+    :root {
+      --bg: #fdf8ee;
+      --panel: #ffffff;
+      --border: #e5d8bd;
+      --text: #3d3126;
+      --primary: #4f8a4b;
+      --primary-hover: #3e703b;
+      --accent: #d9822b;
+      --warning: #c84b31;
     }
-  }
-
-  const nextIdx = (s.turnIndex + 1) % players.length;
-  // 山札が0枚ならドローをスキップして直接配置フェーズへ
-  const nextPhase = deck.length > 0 ? 'draw' : 'place';
-  await saveState({
-    board,
-    players,
-    turnIndex: nextIdx,
-    phase: nextPhase,
-    turnCount: s.turnCount + 1,
-    smallLoopCount,
-    completedPonds,
-    logs: logs.slice(-30)
-  });
-}
-
-// --- 描画 ---
-function renderAll() {
-  const s = local.gameState;
-  if (!s) return;
-
-  const currentP = s.players[s.turnIndex];
-  $('turn-count').textContent = s.turnCount;
-  $('current-player-name').textContent = currentP ? currentP.name : '-';
-  $('deck-count').textContent = s.deck.length;
-  $('small-loop-count').textContent = s.smallLoopCount || 0;
-  $('pond-count').textContent = s.completedPonds || 0;
-  $('player-count').textContent = s.players.length;
-
-  $('players-list').innerHTML = s.players.map((p, idx) => `
-    <li class="${idx === s.turnIndex ? 'active-turn' : ''}">
-      <span>${idx === s.turnIndex ? '▶ ' : ''}${escapeHtml(p.name)}${p.id === local.playerId ? ' (あなた)' : ''}</span>
-      <span>手札${p.hand.length}枚</span>
-    </li>
-  `).join('');
-
-  const logBox = $('action-log');
-  logBox.innerHTML = (s.logs || []).map(l => `<div>• ${escapeHtml(l)}</div>`).join('');
-  logBox.scrollTop = logBox.scrollHeight;
-
-  renderTurnControls();
-  renderHand();
-  renderBoard();
-
-  if ((s.status === 'won' || s.status === 'lost') && !local.resultShown) {
-    local.resultShown = true;
-    $('result-title').textContent = s.status === 'won' ? '🎉 街づくり大成功！（勝利）' : '💔 ゲームオーバー';
-    $('result-desc').textContent = s.status === 'won'
-      ? `${s.winLoopTiles.length}枚の道で大きな輪を完成させました！`
-      : '山札がなくなり、誰も配置できるカードがなくなりました。';
-    $('result-modal').classList.remove('hidden');
-  }
-}
-
-function renderTurnControls() {
-  const s = local.gameState;
-  const myTurn = isMyTurn();
-  const me = s.players.find(p => p.id === local.playerId);
-
-  $('draw-btn').classList.add('hidden');
-  $('skip-btn').classList.add('hidden');
-  $('rotate-btn').disabled = true;
-
-  if (s.status !== 'playing') {
-    $('turn-instruction').textContent = s.status === 'won' ? '勝利！大きな輪が完成しました！' : 'ゲーム終了';
-    return;
-  }
-
-  if (!myTurn) {
-    $('turn-instruction').textContent = `${s.players[s.turnIndex].name} さんの手番です...`;
-    return;
-  }
-
-  if (s.phase === 'draw') {
-    $('turn-instruction').textContent = 'あなたの番です！まず山札から1枚引いてください。';
-    $('draw-btn').classList.remove('hidden');
-  } else {
-    const canPlay = me ? hasAnyPlayableCard(s.board, me.hand) : false;
-    $('rotate-btn').disabled = local.selectedHandIdx === null;
-    if (canPlay) {
-      $('turn-instruction').textContent = '手札からカードを選び、回転させて緑の枠に配置してください。';
-    } else {
-      $('turn-instruction').textContent = '手札のどのカードも置ける場所がありません。';
-      $('skip-btn').classList.remove('hidden');
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      height: 100vh;
+      overflow: hidden;
     }
-  }
-}
+    .hidden { display: none !important; }
+    .screen { width: 100vw; height: 100vh; display: flex; flex-direction: column; }
 
-function renderHand() {
-  const s = local.gameState;
-  const me = s.players.find(p => p.id === local.playerId);
-  const container = $('hand-container');
-  if (!me) { container.innerHTML = ''; return; }
+    #lobby-screen {
+      justify-content: center;
+      align-items: center;
+      background: radial-gradient(circle at top, #fffcf5, #efe4cc);
+      overflow-y: auto;
+      padding: 16px;
+    }
+    .lobby-card {
+      background: var(--panel);
+      border: 2px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+      width: 100%;
+      max-width: 460px;
+      box-shadow: 0 10px 30px rgba(80, 60, 30, 0.12);
+    }
+    .lobby-card h1 { margin: 0 0 6px; font-size: 1.6rem; text-align: center; color: #3c6e38; }
+    .ver { font-size: 0.85rem; background: #e8f3e6; padding: 2px 8px; border-radius: 12px; }
+    .subtitle { text-align: center; font-size: 0.88rem; color: #6e5e4f; margin-bottom: 18px; }
+    .warning-box {
+      background: #fff3cd; border: 1px solid #ffeeba; color: #856404;
+      padding: 10px; border-radius: 8px; font-size: 0.8rem; margin-bottom: 14px;
+    }
+    .form-group { margin-bottom: 14px; }
+    .form-group label { display: block; font-weight: bold; font-size: 0.86rem; margin-bottom: 5px; }
+    .form-group input {
+      width: 100%; padding: 10px; border: 1px solid #ccbda0; border-radius: 8px; font-size: 1rem;
+    }
+    .row-input { display: flex; gap: 8px; }
+    .lobby-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+    .waiting-room {
+      margin-top: 20px; padding-top: 16px; border-top: 2px dashed var(--border); text-align: center;
+    }
+    .waiting-room ul { list-style: none; padding: 0; margin: 10px 0; text-align: left; }
+    .waiting-room li {
+      background: #f8f2e4; padding: 6px 12px; border-radius: 6px; margin-bottom: 5px; font-weight: bold;
+    }
+    .small-note { font-size: 0.8rem; color: #786958; }
 
-  const canSelect = isMyTurn() && s.phase === 'place';
-  container.innerHTML = me.hand.map((type, idx) => {
-    const isSel = idx === local.selectedHandIdx;
-    const rot = isSel ? local.currentRot : 0;
-    return `
-      <div class="hand-card ${isSel ? 'selected' : ''}" data-idx="${idx}">
-        <div class="card-svg-wrap">${createCardPreviewSVG(type, rot)}</div>
-        <div class="card-name">${CARD_DEFS[type].name}</div>
+    .btn {
+      border: none; border-radius: 8px; padding: 10px 14px; font-size: 0.92rem;
+      font-weight: bold; cursor: pointer; transition: 0.15s;
+    }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn.primary { background: var(--primary); color: #fff; }
+    .btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
+    .btn.accent { background: var(--accent); color: #fff; }
+    .btn.secondary { background: #e8dec8; color: var(--text); }
+    .btn.warning { background: var(--warning); color: #fff; }
+    .btn.small { padding: 6px 10px; font-size: 0.8rem; }
+    .btn.icon { width: 34px; height: 34px; padding: 0; font-size: 1.1rem; background: #fff; border: 1px solid var(--border); }
+
+    .top-bar {
+      display: flex; align-items: center; justify-content: space-between;
+      background: var(--panel); border-bottom: 2px solid var(--border);
+      padding: 6px 12px; gap: 8px; flex-wrap: wrap;
+    }
+    .badge { background: #e8dec8; padding: 2px 8px; border-radius: 10px; font-size: 0.78rem; margin-left: 4px; }
+    .status-items { display: flex; gap: 6px; flex-wrap: wrap; }
+    .stat-pill { background: #f6efe0; padding: 3px 8px; border-radius: 12px; font-size: 0.8rem; }
+
+    .main-area { flex: 1; display: flex; min-height: 0; }
+    .side-panel {
+      width: 220px; background: var(--panel); border-right: 2px solid var(--border);
+      padding: 10px; display: flex; flex-direction: column; gap: 8px; overflow-y: auto;
+    }
+    .side-panel h4 { margin: 0 0 4px; font-size: 0.88rem; color: #5b4b3c; }
+    #players-list { list-style: none; padding: 0; margin: 0; }
+    #players-list li {
+      padding: 5px 8px; border-radius: 6px; margin-bottom: 4px; font-size: 0.82rem;
+      display: flex; justify-content: space-between; background: #faf5ea;
+    }
+    #players-list li.active-turn { background: #dff2dc; border: 1px solid var(--primary); font-weight: bold; }
+    .goal-box { background: #f4f9f2; border: 1px solid #c5dfc0; border-radius: 8px; padding: 8px; font-size: 0.78rem; }
+    .goal-box .hint { color: #6c6052; margin-bottom: 0; }
+    .log-box {
+      flex: 1; background: #faf6ed; border: 1px solid var(--border); border-radius: 8px;
+      padding: 8px; font-size: 0.76rem; color: #5a4e42; overflow-y: auto; min-height: 70px;
+    }
+
+    .board-container { flex: 1; position: relative; background: #e9f2df; overflow: hidden; cursor: grab; touch-action: none; }
+    .board-container:active { cursor: grabbing; }
+    .board-svg { width: 100%; height: 100%; display: block; }
+    .map-controls { position: absolute; top: 10px; right: 10px; display: flex; gap: 6px; align-items: center; }
+    .confirm-bar {
+      position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+      background: rgba(255, 255, 255, 0.96); border: 2px solid var(--primary);
+      padding: 6px 12px; border-radius: 12px; display: flex; gap: 8px; align-items: center;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15); font-weight: bold; font-size: 0.85rem; white-space: nowrap;
+    }
+
+    .valid-slot {
+      fill: rgba(79, 138, 75, 0.24); stroke: #3c6e38; stroke-width: 2; stroke-dasharray: 5,3;
+      cursor: pointer; transition: fill 0.15s;
+    }
+    .valid-slot:hover { fill: rgba(79, 138, 75, 0.45); }
+    .win-highlight { stroke: #f59e0b; stroke-width: 4; filter: drop-shadow(0 0 6px #fbbf24); }
+
+    .bottom-bar {
+      background: var(--panel); border-top: 2px solid var(--border);
+      padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;
+    }
+    .turn-controls { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }
+    .instruction { font-weight: bold; font-size: 0.88rem; color: #3c6e38; }
+    .action-buttons { display: flex; gap: 6px; flex-wrap: wrap; }
+    .hand-container { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+    .hand-card {
+      width: 102px; min-width: 102px; background: #faf4e6; border: 2px solid var(--border);
+      border-radius: 10px; padding: 5px; text-align: center; cursor: pointer; transition: 0.15s;
+    }
+    .hand-card:hover { transform: translateY(-2px); border-color: #b5a382; }
+    .hand-card.selected { border-color: var(--primary); background: #eaf6e8; box-shadow: 0 0 0 2px rgba(79,138,75,0.25); }
+    .hand-card .card-svg-wrap { width: 78px; height: 72px; margin: 0 auto; }
+    .hand-card .card-name { font-size: 0.72rem; font-weight: bold; margin-top: 2px; }
+
+    .modal {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+      display: flex; align-items: center; justify-content: center; z-index: 100;
+    }
+    .modal-content {
+      background: #fff; padding: 24px; border-radius: 16px; max-width: 400px; width: 90%; text-align: center;
+    }
+    .modal-actions { display: flex; gap: 10px; justify-content: center; margin-top: 18px; }
+
+    @media (max-width: 720px) {
+      .side-panel { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="lobby-screen" class="screen">
+    <div class="lobby-card">
+      <h1>縁もたけな輪 <span class="ver">Ver.0.1</span></h1>
+      <p class="subtitle">みんなで協力して、大きな輪の街をつくろう！（1〜8人）</p>
+
+      <div id="firebase-warning" class="warning-box hidden">
+        ※ Firebase設定が未入力です。オンライン通信を使う場合はコード内の <code>firebaseConfig</code> を書き換えてください。（下の「オフラインで遊ぶ」は今すぐ試せます）
       </div>
-    `;
-  }).join('');
 
-  container.querySelectorAll('.hand-card').forEach(el => {
-    el.onclick = () => {
-      if (!canSelect) return;
-      const idx = Number(el.dataset.idx);
-      if (local.selectedHandIdx === idx) {
-        rotateSelected();
-      } else {
-        local.selectedHandIdx = idx;
-        local.currentRot = 0;
-        local.pendingSlot = null;
-        $('confirm-bar').classList.add('hidden');
-        renderAll();
+      <div class="form-group">
+        <label for="nickname-input">ニックネーム</label>
+        <input id="nickname-input" type="text" maxlength="12" placeholder="例：たろう" />
+      </div>
+
+      <div class="form-group">
+        <label for="room-id-input">4桁のルームID（合言葉）</label>
+        <div class="row-input">
+          <input id="room-id-input" type="text" maxlength="4" pattern="\d{4}" placeholder="例：1234" />
+          <button id="random-room-btn" class="btn secondary" type="button">ランダム生成</button>
+        </div>
+      </div>
+
+      <div class="lobby-actions">
+        <button id="join-online-btn" class="btn primary">ルームを作成 / 参加（オンライン）</button>
+        <button id="start-offline-btn" class="btn accent">オフライン（1人プレイ）で遊ぶ</button>
+      </div>
+
+      <div id="waiting-room" class="waiting-room hidden">
+        <h3>ルーム <span id="wait-room-code"></span> 待機中</h3>
+        <p class="small-note">同じ4桁IDを入力したメンバーがここに表示されます（最大8人）</p>
+        <ul id="waiting-players-list"></ul>
+        <button id="start-online-game-btn" class="btn primary hidden">このメンバーでゲーム開始！</button>
+        <p id="waiting-host-msg" class="small-note hidden">ホストがゲームを開始するのを待っています...</p>
+      </div>
+    </div>
+  </div>
+
+  <div id="game-screen" class="screen hidden">
+    <header class="top-bar">
+      <div class="brand">
+        <strong>縁もたけな輪</strong>
+        <span id="room-badge" class="badge"></span>
+      </div>
+      <div class="status-items">
+        <div class="stat-pill">ターン: <strong id="turn-count">1</strong></div>
+        <div class="stat-pill">手番: <strong id="current-player-name">-</strong></div>
+        <div class="stat-pill">山札: <strong id="deck-count">0</strong>枚</div>
+        <div class="stat-pill">小ループ: <strong id="small-loop-count">0</strong></div>
+        <div class="stat-pill">完成池: <strong id="pond-count">0</strong></div>
+      </div>
+      <button id="leave-btn" class="btn small secondary">退出</button>
+    </header>
+
+    <div class="main-area">
+      <aside class="side-panel">
+        <h4>参加者 (<span id="player-count">1</span>/8)</h4>
+        <ul id="players-list"></ul>
+        <div class="goal-box">
+          <h4>勝利条件</h4>
+          <p>太い「メインの道」を繋げて、<strong>8枚以上の大きな輪</strong>を完成させよう！</p>
+          <p class="hint">※細いサブの道はメインには繋がりません。川は矢印の向きに合わせて繋ぎます。</p>
+        </div>
+        <div id="action-log" class="log-box"></div>
+      </aside>
+
+      <div id="board-container" class="board-container">
+        <svg id="board-svg" class="board-svg">
+          <g id="board-viewport"></g>
+        </svg>
+        <div class="map-controls">
+          <button id="zoom-in-btn" class="btn icon" title="拡大">＋</button>
+          <button id="zoom-out-btn" class="btn icon" title="縮小">－</button>
+          <button id="reset-view-btn" class="btn small secondary">中央</button>
+        </div>
+        <div id="confirm-bar" class="confirm-bar hidden">
+          <span>ここに配置？</span>
+          <button id="confirm-place-btn" class="btn primary small">確定</button>
+          <button id="cancel-place-btn" class="btn secondary small">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <footer class="bottom-bar">
+      <div class="turn-controls">
+        <div id="turn-instruction" class="instruction">読み込み中...</div>
+        <div class="action-buttons">
+          <button id="draw-btn" class="btn primary hidden">山札から1枚引く</button>
+          <button id="rotate-btn" class="btn accent" disabled>回転 (R)</button>
+          <button id="skip-btn" class="btn warning hidden">置けないためスキップ</button>
+        </div>
+      </div>
+      <div id="hand-container" class="hand-container"></div>
+    </footer>
+  </div>
+
+  <div id="result-modal" class="modal hidden">
+    <div class="modal-content">
+      <h2 id="result-title"></h2>
+      <p id="result-desc"></p>
+      <div class="modal-actions">
+        <button id="close-result-btn" class="btn secondary">盤面を見る</button>
+        <button id="back-lobby-btn" class="btn primary">ロビーへ戻る</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-app.js';
+    import {
+      getFirestore, doc, onSnapshot, runTransaction, updateDoc
+    } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-firestore.js';
+
+    /* === 1. Firebase設定（オンラインで遊ぶ場合はここを書き換えてください） === */
+    const firebaseConfig = {
+      apiKey: "YOUR_API_KEY",
+      authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+      projectId: "YOUR_PROJECT_ID",
+      storageBucket: "YOUR_PROJECT_ID.firebasestorage.app",
+      messagingSenderId: "YOUR_SENDER_ID",
+      appId: "YOUR_APP_ID"
+    };
+
+    function isFirebaseConfigured() {
+      return firebaseConfig.apiKey && !firebaseConfig.apiKey.startsWith("YOUR_");
+    }
+
+    /* === 2. ゲーム設定・カード定義 === */
+    const GAME_CONFIG = {
+      INITIAL_HAND_SIZE: 3,
+      MAX_PLAYERS: 8,
+      BIG_LOOP_MIN_TILES: 8,
+      SMALL_LOOP_MIN_TILES: 3,
+      POND_MIN_TILES: 3,
+      MISSIONS_ENABLED: false,
+      MISSIONS: []
+    };
+
+    const CARD_DEFS = {
+      waterfall: {
+        name: '滝（起点）', category: 'river',
+        edges: ['river_out', 'grass', 'grass', 'grass', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverIns: [], riverOuts: [0], isWaterfall: true
+      },
+      main_straight: {
+        name: 'メイン直線', category: 'road',
+        edges: ['main', 'grass', 'grass', 'main', 'grass', 'grass'],
+        mainEdges: [0, 3], subEdges: []
+      },
+      main_curve_wide: {
+        name: 'メインゆるカーブ', category: 'road',
+        edges: ['main', 'grass', 'main', 'grass', 'grass', 'grass'],
+        mainEdges: [0, 2], subEdges: []
+      },
+      main_curve_sharp: {
+        name: 'メイン急カーブ', category: 'road',
+        edges: ['main', 'main', 'grass', 'grass', 'grass', 'grass'],
+        mainEdges: [0, 1], subEdges: []
+      },
+      main_rotary_3: {
+        name: 'ロータリー(3方向)', category: 'road',
+        edges: ['main', 'grass', 'main', 'grass', 'main', 'grass'],
+        mainEdges: [0, 2, 4], subEdges: [], isRotary: true
+      },
+      main_rotary_4: {
+        name: 'ロータリー(4方向)', category: 'road',
+        edges: ['main', 'main', 'grass', 'main', 'main', 'grass'],
+        mainEdges: [0, 1, 3, 4], subEdges: [], isRotary: true
+      },
+      main_cross: {
+        name: '十字路(メイン+サブ)', category: 'road',
+        edges: ['main', 'sub', 'grass', 'main', 'sub', 'grass'],
+        mainEdges: [0, 3], subEdges: [1, 4]
+      },
+      main_t_junction: {
+        name: 'T字路(メイン+サブ)', category: 'road',
+        edges: ['main', 'sub', 'grass', 'main', 'grass', 'grass'],
+        mainEdges: [0, 3], subEdges: [1]
+      },
+      main_deadend: {
+        name: 'メイン行き止まり', category: 'road',
+        edges: ['main', 'grass', 'grass', 'grass', 'grass', 'grass'],
+        mainEdges: [0], subEdges: []
+      },
+      sub_straight: {
+        name: 'サブ直線', category: 'road',
+        edges: ['sub', 'grass', 'grass', 'sub', 'grass', 'grass'],
+        mainEdges: [], subEdges: [0, 3]
+      },
+      sub_curve: {
+        name: 'サブカーブ', category: 'road',
+        edges: ['sub', 'grass', 'sub', 'grass', 'grass', 'grass'],
+        mainEdges: [], subEdges: [0, 2]
+      },
+      sub_deadend: {
+        name: 'サブ行き止まり', category: 'road',
+        edges: ['sub', 'grass', 'grass', 'grass', 'grass', 'grass'],
+        mainEdges: [], subEdges: [0]
+      },
+      bridge: {
+        name: '橋（メイン道＋川）', category: 'bridge',
+        edges: ['main', 'river_in', 'grass', 'main', 'river_out', 'grass'],
+        mainEdges: [0, 3], subEdges: [], riverIns: [1], riverOuts: [4], isBridge: true
+      },
+      river_straight: {
+        name: '川（直線）', category: 'river',
+        edges: ['river_in', 'grass', 'grass', 'river_out', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverIns: [0], riverOuts: [3]
+      },
+      river_curve: {
+        name: '川（カーブ）', category: 'river',
+        edges: ['river_in', 'grass', 'river_out', 'grass', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverIns: [0], riverOuts: [2]
+      },
+      river_curve_sharp: {
+        name: '川（急カーブ）', category: 'river',
+        edges: ['river_in', 'river_out', 'grass', 'grass', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverIns: [0], riverOuts: [1]
+      },
+      river_fork: {
+        name: '川（分岐）', category: 'river',
+        edges: ['river_in', 'grass', 'river_out', 'grass', 'river_out', 'grass'],
+        mainEdges: [], subEdges: [], riverIns: [0], riverOuts: [2, 4]
+      },
+      river_merge: {
+        name: '川（合流）', category: 'river',
+        edges: ['river_in', 'grass', 'river_in', 'river_out', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverIns: [0, 2], riverOuts: [3]
+      },
+      pond_1: {
+        name: '池（1辺）', category: 'pond',
+        edges: ['pond', 'grass', 'grass', 'grass', 'grass', 'grass'],
+        mainEdges: [], subEdges: []
+      },
+      pond_2_adj: {
+        name: '池（2辺）', category: 'pond',
+        edges: ['pond', 'pond', 'grass', 'grass', 'grass', 'grass'],
+        mainEdges: [], subEdges: []
+      },
+      pond_1_river: {
+        name: '池（川流入口つき1辺）', category: 'pond',
+        edges: ['pond', 'grass', 'grass', 'river_in', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverIns: [3], riverOuts: []
+      },
+      pond_2_adj_river: {
+        name: '池（川流入口つき2辺）', category: 'pond',
+        edges: ['pond', 'pond', 'grass', 'river_in', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverIns: [3], riverOuts: []
       }
     };
-  });
-}
 
-function renderBoard() {
-  const s = local.gameState;
-  const vp = $('board-viewport');
-  const winSet = new Set(s.winLoopTiles || []);
-  let html = '';
+    const DECK_RECIPE = {
+      main_straight: 10, main_curve_wide: 10, main_curve_sharp: 5,
+      main_rotary_3: 3, main_rotary_4: 2, main_cross: 2, main_t_junction: 2, main_deadend: 2,
+      sub_straight: 1, sub_curve: 1, sub_deadend: 1,
+      bridge: 5,
+      river_straight: 3, river_curve: 3, river_curve_sharp: 1, river_fork: 2, river_merge: 1,
+      pond_2_adj: 3, pond_1: 2, pond_1_river: 2, pond_2_adj_river: 1
+    };
 
-  // 配置済みカード
-  for (const [key, tile] of Object.entries(s.board)) {
-    const [q, r] = key.split(',').map(Number);
-    const { x, y } = hexToPixel(q, r);
-    const cls = winSet.has(key) ? 'win-highlight' : '';
-    html += `<g class="${cls}" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">${renderCardInnerSVG(tile.type, tile.rot)}</g>`;
-  }
+    function createShuffledDeck() {
+      const deck = [];
+      for (const [type, count] of Object.entries(DECK_RECIPE)) {
+        for (let i = 0; i < count; i++) deck.push(type);
+      }
+      for (let i = deck.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [deck[i], deck[j]] = [deck[j], deck[i]];
+      }
+      return deck;
+    }
 
-  // 配置可能スポット
-  if (isMyTurn() && s.phase === 'place' && local.selectedHandIdx !== null) {
-    const me = s.players[s.turnIndex];
-    const selType = me.hand[local.selectedHandIdx];
-    if (selType) {
-      const slots = getValidPlacements(s.board, selType, local.currentRot);
-      for (const { q, r } of slots) {
-        const { x, y } = hexToPixel(q, r);
-        const isPending = local.pendingSlot && local.pendingSlot.q === q && local.pendingSlot.r === r;
-        if (isPending) {
-          html += `<g opacity="0.85" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">${renderCardInnerSVG(selType, local.currentRot)}<polygon points="${HEX_POINTS}" fill="none" stroke="#15803d" stroke-width="3" /></g>`;
-        } else {
-          html += `<polygon class="valid-slot" data-q="${q}" data-r="${r}" points="${HEX_POINTS}" transform="translate(${x.toFixed(1)},${y.toFixed(1)})" />`;
+    function createInitialBoard() {
+      return {
+        "0,0": { type: "waterfall", rot: 3, placedBy: "初期配置" },
+        "0,-1": { type: "main_curve_wide", rot: 5, placedBy: "初期配置" },
+        "-1,-1": { type: "main_straight", rot: 2, placedBy: "初期配置" },
+        "1,-2": { type: "main_straight", rot: 1, placedBy: "初期配置" }
+      };
+    }
+
+    /* === 3. 六角形ロジック・ループ判定 === */
+    const DIRS = [[0, -1], [1, -1], [1, 0], [0, 1], [-1, 1], [-1, 0]];
+    const HEX_SIZE = 46;
+
+    function hexKey(q, r) { return `${q},${r}`; }
+    function parseKey(key) {
+      const [q, r] = key.split(',').map(Number);
+      return { q, r };
+    }
+    function hexToPixel(q, r, size = HEX_SIZE) {
+      return {
+        x: size * (1.5 * q),
+        y: size * ((Math.sqrt(3) / 2) * q + Math.sqrt(3) * r)
+      };
+    }
+    function oppositeDir(d) { return (d + 3) % 6; }
+    function getRotatedEdges(type, rot) {
+      const edges = CARD_DEFS[type].edges;
+      return edges.map((_, i) => edges[(i - rot + 6) % 6]);
+    }
+    function getRotatedIndices(indices, rot) {
+      return (indices || []).map(i => (i + rot) % 6);
+    }
+    function canEdgesConnect(edgeA, edgeB) {
+      if (edgeA === 'river_in') return edgeB === 'river_out';
+      if (edgeA === 'river_out') return edgeB === 'river_in';
+      return edgeA === edgeB;
+    }
+    function canPlaceCard(board, q, r, type, rot) {
+      const key = hexKey(q, r);
+      if (board[key]) return false;
+      const myEdges = getRotatedEdges(type, rot);
+      let hasNeighbor = false;
+      for (let d = 0; d < 6; d++) {
+        const neighbor = board[hexKey(q + DIRS[d][0], r + DIRS[d][1])];
+        if (!neighbor) continue;
+        hasNeighbor = true;
+        const nbEdges = getRotatedEdges(neighbor.type, neighbor.rot);
+        if (!canEdgesConnect(myEdges[d], nbEdges[oppositeDir(d)])) return false;
+      }
+      return hasNeighbor;
+    }
+    function getCandidateCoords(board) {
+      const candidates = new Set();
+      for (const key of Object.keys(board)) {
+        const { q, r } = parseKey(key);
+        for (const [dq, dr] of DIRS) {
+          const nk = hexKey(q + dq, r + dr);
+          if (!board[nk]) candidates.add(nk);
         }
       }
+      return Array.from(candidates).map(parseKey);
     }
-  }
+    function getValidPlacements(board, type, rot) {
+      return getCandidateCoords(board).filter(({ q, r }) => canPlaceCard(board, q, r, type, rot));
+    }
+    function canPlaceCardAnyRot(board, type) {
+      const coords = getCandidateCoords(board);
+      for (const { q, r } of coords) {
+        for (let rot = 0; rot < 6; rot++) {
+          if (canPlaceCard(board, q, r, type, rot)) return true;
+        }
+      }
+      return false;
+    }
+    function hasAnyPlayableCard(board, hand) {
+      return hand.some(type => canPlaceCardAnyRot(board, type));
+    }
+    function detectMainRoadLoops(board) {
+      const adj = new Map();
+      for (const [key, tile] of Object.entries(board)) {
+        const mainEdges = getRotatedIndices(CARD_DEFS[tile.type].mainEdges, tile.rot);
+        if (mainEdges.length < 2) continue;
+        const { q, r } = parseKey(key);
+        const neighbors = [];
+        for (const d of mainEdges) {
+          const nk = hexKey(q + DIRS[d][0], r + DIRS[d][1]);
+          const nTile = board[nk];
+          if (!nTile) continue;
+          const nMain = getRotatedIndices(CARD_DEFS[nTile.type].mainEdges, nTile.rot);
+          if (nMain.includes(oppositeDir(d))) neighbors.push(nk);
+        }
+        if (neighbors.length >= 2) adj.set(key, neighbors);
+      }
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const [k, list] of adj.entries()) {
+          const filtered = list.filter(nb => adj.has(nb));
+          if (filtered.length < 2) {
+            adj.delete(k);
+            changed = true;
+          } else if (filtered.length !== list.length) {
+            adj.set(k, filtered);
+          }
+        }
+      }
+      const nodes = Array.from(adj.keys()).sort();
+      let bigLoop = null;
+      const smallLoopSignatures = new Set();
+      for (let idx = 0; idx < nodes.length; idx++) {
+        const start = nodes[idx];
+        const visited = new Set([start]);
+        const path = [start];
+        let steps = 0;
+        const dfs = (curr) => {
+          if (bigLoop) return;
+          if (++steps > 4000) return;
+          const nbs = adj.get(curr) || [];
+          for (const next of nbs) {
+            if (next === start && path.length >= GAME_CONFIG.SMALL_LOOP_MIN_TILES) {
+              if (path.length >= GAME_CONFIG.BIG_LOOP_MIN_TILES) {
+                bigLoop = [...path];
+                return;
+              } else {
+                smallLoopSignatures.add([...path].sort().join('|'));
+              }
+            } else if (!visited.has(next) && next > start) {
+              visited.add(next);
+              path.push(next);
+              dfs(next);
+              path.pop();
+              visited.delete(next);
+              if (bigLoop) return;
+            }
+          }
+        };
+        dfs(start);
+        if (bigLoop) break;
+      }
+      return { bigLoop, smallLoopCount: smallLoopSignatures.size };
+    }
+    function detectCompletedPonds(board) {
+      const visited = new Set();
+      let completedCount = 0;
+      for (const [key, tile] of Object.entries(board)) {
+        const edges = getRotatedEdges(tile.type, tile.rot);
+        if (!edges.includes('pond') || visited.has(key)) continue;
+        const queue = [key];
+        visited.add(key);
+        const group = [];
+        let isClosed = true;
+        while (queue.length > 0) {
+          const curr = queue.shift();
+          group.push(curr);
+          const { q, r } = parseKey(curr);
+          const cTile = board[curr];
+          const cEdges = getRotatedEdges(cTile.type, cTile.rot);
+          for (let d = 0; d < 6; d++) {
+            if (cEdges[d] !== 'pond') continue;
+            const nk = hexKey(q + DIRS[d][0], r + DIRS[d][1]);
+            const nb = board[nk];
+            if (!nb) isClosed = false;
+            else if (!visited.has(nk)) { visited.add(nk); queue.push(nk); }
+          }
+        }
+        if (isClosed && group.length >= GAME_CONFIG.POND_MIN_TILES) completedCount++;
+      }
+      return completedCount;
+    }
 
-  vp.innerHTML = html;
-  updateViewportTransform();
+    /* === 4. SVGカード描画 === */
+    const R = HEX_SIZE;
+    const SQRT3 = Math.sqrt(3);
+    const VERTICES = Array.from({ length: 6 }, (_, i) => {
+      const rad = (Math.PI / 180) * (60 * i);
+      return [R * Math.cos(rad), R * Math.sin(rad)];
+    });
+    const HEX_POINTS = VERTICES.map(v => v.map(n => n.toFixed(2)).join(',')).join(' ');
+    const EDGE_MIDS = [
+      [0, -(R * SQRT3) / 2],
+      [R * 0.75, -(R * SQRT3) / 4],
+      [R * 0.75, (R * SQRT3) / 4],
+      [0, (R * SQRT3) / 2],
+      [-R * 0.75, (R * SQRT3) / 4],
+      [-R * 0.75, -(R * SQRT3) / 4]
+    ];
+    function edgeVertexPair(d) { return [VERTICES[(d + 4) % 6], VERTICES[(d + 5) % 6]]; }
+    function renderRiverArrow(d, isOut) {
+      const [mx, my] = EDGE_MIDS[d];
+      const dist = Math.hypot(mx, my);
+      const cx = mx * 0.68, cy = my * 0.68;
+      const dir = isOut ? 1 : -1;
+      const angle = Math.atan2((my / dist) * dir, (mx / dist) * dir) * (180 / Math.PI);
+      return `<polygon points="5,0 -3,-3.5 -3,3.5" fill="#ffffff" opacity="0.92" transform="translate(${cx.toFixed(1)},${cy.toFixed(1)}) rotate(${angle.toFixed(1)})" />`;
+    }
+    function renderCardInnerSVG(type, rot = 0) {
+      const def = CARD_DEFS[type];
+      const layers = [];
+      layers.push(`<polygon points="${HEX_POINTS}" fill="#b7de8d" stroke="#76a34c" stroke-width="2" />`);
+      const pondEdges = def.edges.map((e, i) => (e === 'pond' ? i : -1)).filter(i => i >= 0);
+      if (pondEdges.length > 0) {
+        for (const d of pondEdges) {
+          const [v1, v2] = edgeVertexPair(d);
+          const pathD = `M 0,0 L ${v1[0].toFixed(1)},${v1[1].toFixed(1)} L ${v2[0].toFixed(1)},${v2[1].toFixed(1)} Z`;
+          layers.push(`<path d="${pathD}" fill="#e6d6a8" stroke="#c7b279" stroke-width="1" />`);
+          layers.push(`<path d="M 0,0 Q ${(v1[0]*0.8).toFixed(1)},${(v1[1]*0.8).toFixed(1)} ${v1[0].toFixed(1)},${v1[1].toFixed(1)} L ${v2[0].toFixed(1)},${v2[1].toFixed(1)} Q ${(v2[0]*0.8).toFixed(1)},${(v2[1]*0.8).toFixed(1)} 0,0 Z" fill="#4cc3f0" />`);
+        }
+        layers.push(`<circle cx="0" cy="0" r="10" fill="#4cc3f0" />`);
+      }
+      const ins = def.riverIns || [];
+      const outs = def.riverOuts || [];
+      if (ins.length > 0 || outs.length > 0) {
+        const riverPts = [...ins, ...outs];
+        for (const d of riverPts) {
+          const [mx, my] = EDGE_MIDS[d];
+          const stopFactor = pondEdges.length > 0 ? 0.3 : 0;
+          layers.push(`<path d="M ${mx.toFixed(1)},${my.toFixed(1)} Q 0,0 ${(mx*stopFactor).toFixed(1)},${(my*stopFactor).toFixed(1)}" stroke="#0284c7" stroke-width="12" fill="none" stroke-linecap="round" />`);
+          layers.push(`<path d="M ${mx.toFixed(1)},${my.toFixed(1)} Q 0,0 ${(mx*stopFactor).toFixed(1)},${(my*stopFactor).toFixed(1)}" stroke="#38bdf8" stroke-width="9" fill="none" stroke-linecap="round" />`);
+        }
+        if (riverPts.length > 1 && pondEdges.length === 0) layers.push(`<circle cx="0" cy="0" r="5" fill="#38bdf8" />`);
+        for (const d of ins) layers.push(renderRiverArrow(d, false));
+        for (const d of outs) layers.push(renderRiverArrow(d, true));
+      }
+      if (def.isWaterfall) {
+        layers.push(`<circle cx="0" cy="-2" r="14" fill="#8b7d70" stroke="#5e5248" stroke-width="1.5" />`);
+        layers.push(`<circle cx="0" cy="2" r="10" fill="#e0f7ff" />`);
+        layers.push(`<text x="0" y="3" text-anchor="middle" font-size="11" fill="#0369a1" font-weight="bold">滝</text>`);
+      }
+      if (def.subEdges && def.subEdges.length > 0) {
+        for (const d of def.subEdges) {
+          const [mx, my] = EDGE_MIDS[d];
+          layers.push(`<line x1="0" y1="0" x2="${mx.toFixed(1)}" y2="${my.toFixed(1)}" stroke="#7c5c38" stroke-width="6" stroke-linecap="round" />`);
+          layers.push(`<line x1="0" y1="0" x2="${mx.toFixed(1)}" y2="${my.toFixed(1)}" stroke="#d9b98c" stroke-width="4" stroke-linecap="round" />`);
+        }
+      }
+      if (def.mainEdges && def.mainEdges.length > 0) {
+        if (def.isBridge) {
+          const [m1x, m1y] = EDGE_MIDS[def.mainEdges[0]];
+          const [m2x, m2y] = EDGE_MIDS[def.mainEdges[1]];
+          layers.push(`<line x1="${m1x.toFixed(1)}" y1="${m1y.toFixed(1)}" x2="${m2x.toFixed(1)}" y2="${m2y.toFixed(1)}" stroke="#5c3a21" stroke-width="17" />`);
+          layers.push(`<line x1="${(m1x*0.55).toFixed(1)}" y1="${(m1y*0.55).toFixed(1)}" x2="${(m2x*0.55).toFixed(1)}" y2="${(m2y*0.55).toFixed(1)}" stroke="#a47148" stroke-width="15" stroke-dasharray="3,2" />`);
+          layers.push(`<line x1="${m1x.toFixed(1)}" y1="${m1y.toFixed(1)}" x2="${m2x.toFixed(1)}" y2="${m2y.toFixed(1)}" stroke="#f6e7c1" stroke-width="10" />`);
+        } else {
+          for (const d of def.mainEdges) {
+            const [mx, my] = EDGE_MIDS[d];
+            layers.push(`<line x1="0" y1="0" x2="${mx.toFixed(1)}" y2="${my.toFixed(1)}" stroke="#6e5438" stroke-width="15" stroke-linecap="round" />`);
+          }
+          for (const d of def.mainEdges) {
+            const [mx, my] = EDGE_MIDS[d];
+            layers.push(`<line x1="0" y1="0" x2="${mx.toFixed(1)}" y2="${my.toFixed(1)}" stroke="#f6e7c1" stroke-width="11" stroke-linecap="round" />`);
+          }
+          if (def.isRotary) {
+            layers.push(`<circle cx="0" cy="0" r="14" fill="#6e5438" />`);
+            layers.push(`<circle cx="0" cy="0" r="12" fill="#f6e7c1" />`);
+            layers.push(`<circle cx="0" cy="0" r="5" fill="#76a34c" />`);
+          } else if (def.mainEdges.length === 1) {
+            layers.push(`<circle cx="0" cy="0" r="7" fill="#6e5438" />`);
+            layers.push(`<circle cx="0" cy="0" r="5" fill="#f6e7c1" />`);
+          }
+        }
+      }
+      return `<g transform="rotate(${rot * 60})">${layers.join('')}</g>`;
+    }
+    function createCardPreviewSVG(type, rot = 0) {
+      return `<svg viewBox="-50 -46 100 92" width="100%" height="100%">${renderCardInnerSVG(type, rot)}</svg>`;
+    }
 
-  vp.querySelectorAll('.valid-slot').forEach(el => {
-    el.onclick = () => {
-      if (local.dragMoved) return;
-      local.pendingSlot = { q: Number(el.dataset.q), r: Number(el.dataset.r) };
-      $('confirm-bar').classList.remove('hidden');
+    /* === 5. ゲーム進行・通信制御 === */
+    let db = null;
+    if (isFirebaseConfigured()) {
+      const app = initializeApp(firebaseConfig);
+      db = getFirestore(app);
+    } else {
+      document.getElementById('firebase-warning').classList.remove('hidden');
+    }
+
+    const local = {
+      mode: 'online',
+      roomId: null,
+      playerId: sessionStorage.getItem('enmo_pid') || ('p_' + Math.random().toString(36).slice(2, 10)),
+      nickname: '',
+      gameState: null,
+      unsub: null,
+      selectedHandIdx: null,
+      currentRot: 0,
+      pendingSlot: null,
+      panX: 0, panY: 0, zoom: 1.15,
+      isDragging: false, dragMoved: false, lastMouse: { x: 0, y: 0 },
+      resultShown: false
+    };
+    sessionStorage.setItem('enmo_pid', local.playerId);
+    const $ = id => document.getElementById(id);
+
+    $('random-room-btn').onclick = () => {
+      $('room-id-input').value = String(Math.floor(1000 + Math.random() * 9000));
+    };
+
+    $('start-offline-btn').onclick = () => {
+      const name = $('nickname-input').value.trim() || 'プレイヤー1';
+      local.mode = 'offline';
+      local.nickname = name;
+      const deck = createShuffledDeck();
+      const hand = deck.splice(0, GAME_CONFIG.INITIAL_HAND_SIZE);
+      local.gameState = {
+        status: 'playing', hostId: local.playerId,
+        players: [{ id: local.playerId, name, hand }],
+        turnIndex: 0, phase: 'draw', turnCount: 1, deck,
+        board: createInitialBoard(), smallLoopCount: 0, completedPonds: 0, winLoopTiles: [],
+        logs: ['オフライン（1人プレイ）を開始しました！']
+      };
+      enterGameScreen();
+      renderAll();
+    };
+
+    $('join-online-btn').onclick = async () => {
+      if (!db) return alert('firebaseConfig を設定してからオンライン参加してください。');
+      const name = $('nickname-input').value.trim();
+      const roomId = $('room-id-input').value.trim();
+      if (!name) return alert('ニックネームを入力してください。');
+      if (!/^\d{4}$/.test(roomId)) return alert('4桁の数字でルームIDを入力してください。');
+
+      local.mode = 'online';
+      local.nickname = name;
+      local.roomId = roomId;
+      const roomRef = doc(db, 'rooms', roomId);
+      try {
+        await runTransaction(db, async (tx) => {
+          const snap = await tx.get(roomRef);
+          if (!snap.exists()) {
+            tx.set(roomRef, {
+              status: 'lobby', hostId: local.playerId,
+              players: [{ id: local.playerId, name, hand: [] }],
+              turnIndex: 0, phase: 'draw', turnCount: 1, deck: [],
+              board: createInitialBoard(), smallLoopCount: 0, completedPonds: 0, winLoopTiles: [],
+              logs: [`${name} がルーム ${roomId} を作成しました。`]
+            });
+          } else {
+            const data = snap.data();
+            const exists = data.players.some(p => p.id === local.playerId);
+            if (!exists) {
+              if (data.status !== 'lobby') throw new Error('このルームはすでにゲーム進行中です。');
+              if (data.players.length >= GAME_CONFIG.MAX_PLAYERS) throw new Error('満員（最大8人）です。');
+              data.players.push({ id: local.playerId, name, hand: [] });
+              data.logs = [...(data.logs || []), `${name} が参加しました。`].slice(-30);
+              tx.update(roomRef, { players: data.players, logs: data.logs });
+            }
+          }
+        });
+        if (local.unsub) local.unsub();
+        local.unsub = onSnapshot(roomRef, (snap) => {
+          if (!snap.exists()) return;
+          local.gameState = snap.data();
+          if (local.gameState.status === 'lobby') renderWaitingRoom();
+          else {
+            if ($('game-screen').classList.contains('hidden')) enterGameScreen();
+            renderAll();
+          }
+        });
+      } catch (err) { alert(err.message); }
+    };
+
+    $('start-online-game-btn').onclick = async () => {
+      const state = local.gameState;
+      const deck = createShuffledDeck();
+      const players = state.players.map(p => ({ ...p, hand: deck.splice(0, GAME_CONFIG.INITIAL_HAND_SIZE) }));
+      await saveState({
+        status: 'playing', players, deck, board: createInitialBoard(),
+        turnIndex: 0, phase: 'draw', turnCount: 1, smallLoopCount: 0, completedPonds: 0, winLoopTiles: [],
+        logs: [...(state.logs || []), 'ゲーム開始！まずは山札から1枚引きましょう。'].slice(-30)
+      });
+    };
+
+    function renderWaitingRoom() {
+      const s = local.gameState;
+      $('waiting-room').classList.remove('hidden');
+      $('wait-room-code').textContent = local.roomId;
+      $('waiting-players-list').innerHTML = s.players
+        .map((p, i) => `<li>${i === 0 ? '👑 ' : ''}${escapeHtml(p.name)}</li>`).join('');
+      const isHost = s.hostId === local.playerId;
+      $('start-online-game-btn').classList.toggle('hidden', !isHost);
+      $('waiting-host-msg').classList.toggle('hidden', isHost);
+    }
+
+    async function saveState(patch) {
+      Object.assign(local.gameState, patch);
+      if (local.mode === 'online') await updateDoc(doc(db, 'rooms', local.roomId), patch);
+      else renderAll();
+    }
+
+    function enterGameScreen() {
+      $('lobby-screen').classList.add('hidden');
+      $('game-screen').classList.remove('hidden');
+      $('room-badge').textContent = local.mode === 'online' ? `ルーム: ${local.roomId}` : 'オフライン';
+      resetView();
+    }
+
+    function isMyTurn() {
+      const s = local.gameState;
+      return s && s.status === 'playing' && s.players[s.turnIndex]?.id === local.playerId;
+    }
+
+    $('draw-btn').onclick = async () => {
+      if (!isMyTurn()) return;
+      const s = local.gameState;
+      if (s.phase !== 'draw') return;
+      const deck = [...s.deck];
+      const players = JSON.parse(JSON.stringify(s.players));
+      const me = players[s.turnIndex];
+      const logs = [...(s.logs || [])];
+      if (deck.length > 0) {
+        me.hand.push(deck.pop());
+        logs.push(`${me.name} がカードを1枚引きました。`);
+      }
+      await saveState({ deck, players, phase: 'place', logs: logs.slice(-30) });
+    };
+
+    $('rotate-btn').onclick = () => rotateSelected();
+    window.addEventListener('keydown', (e) => {
+      if ((e.key === 'r' || e.key === 'R') && !$('game-screen').classList.contains('hidden')) rotateSelected();
+    });
+
+    function rotateSelected() {
+      if (local.selectedHandIdx === null) return;
+      local.currentRot = (local.currentRot + 1) % 6;
+      local.pendingSlot = null;
+      $('confirm-bar').classList.add('hidden');
+      renderAll();
+    }
+
+    $('confirm-place-btn').onclick = async () => {
+      if (!isMyTurn() || !local.pendingSlot || local.selectedHandIdx === null) return;
+      const s = local.gameState;
+      const players = JSON.parse(JSON.stringify(s.players));
+      const me = players[s.turnIndex];
+      const cardType = me.hand.splice(local.selectedHandIdx, 1)[0];
+      const board = { ...s.board };
+      board[hexKey(local.pendingSlot.q, local.pendingSlot.r)] = {
+        type: cardType, rot: local.currentRot, placedBy: me.name
+      };
+      local.selectedHandIdx = null;
+      local.currentRot = 0;
+      local.pendingSlot = null;
+      $('confirm-bar').classList.add('hidden');
+
+      const loops = detectMainRoadLoops(board);
+      const completedPonds = detectCompletedPonds(board);
+      const logs = [...(s.logs || []), `${me.name} が「${CARD_DEFS[cardType].name}」を配置しました。`];
+      if (loops.smallLoopCount > s.smallLoopCount) logs.push('✨ 小さなループが完成しました！');
+      if (completedPonds > s.completedPonds) logs.push('💧 新しい池が完成しました！');
+
+      if (loops.bigLoop) {
+        logs.push(`🎉 ${GAME_CONFIG.BIG_LOOP_MIN_TILES}枚以上の大きな輪が完成！全員の勝利！`);
+        await saveState({
+          board, players, status: 'won', winLoopTiles: loops.bigLoop,
+          smallLoopCount: loops.smallLoopCount, completedPonds, logs: logs.slice(-30)
+        });
+        return;
+      }
+      await advanceTurnOrCheckLoss(board, players, s.deck, loops.smallLoopCount, completedPonds, logs);
+    };
+
+    $('cancel-place-btn').onclick = () => {
+      local.pendingSlot = null;
+      $('confirm-bar').classList.add('hidden');
       renderBoard();
     };
-  });
-}
 
-// --- パン・ズーム操作 ---
-const boardContainer = $('board-container');
-function updateViewportTransform() {
-  const rect = boardContainer.getBoundingClientRect();
-  const cx = rect.width / 2 + local.panX;
-  const cy = rect.height / 2 + local.panY;
-  $('board-viewport').setAttribute('transform', `translate(${cx.toFixed(1)},${cy.toFixed(1)}) scale(${local.zoom})`);
-}
-function resetView() {
-  local.panX = 0; local.panY = 40; local.zoom = 1.15;
-  updateViewportTransform();
-}
+    $('skip-btn').onclick = async () => {
+      if (!isMyTurn()) return;
+      const s = local.gameState;
+      const me = s.players[s.turnIndex];
+      const logs = [...(s.logs || []), `${me.name} は出せる場所がなくスキップしました。`];
+      await advanceTurnOrCheckLoss(s.board, s.players, s.deck, s.smallLoopCount, s.completedPonds, logs);
+    };
 
-boardContainer.addEventListener('pointerdown', (e) => {
-  if (e.target.closest('.map-controls') || e.target.closest('.confirm-bar')) return;
-  local.isDragging = true;
-  local.dragMoved = false;
-  local.lastMouse = { x: e.clientX, y: e.clientY };
-});
-window.addEventListener('pointermove', (e) => {
-  if (!local.isDragging) return;
-  const dx = e.clientX - local.lastMouse.x;
-  const dy = e.clientY - local.lastMouse.y;
-  if (Math.hypot(dx, dy) > 4) local.dragMoved = true;
-  local.panX += dx;
-  local.panY += dy;
-  local.lastMouse = { x: e.clientX, y: e.clientY };
-  updateViewportTransform();
-});
-window.addEventListener('pointerup', () => { local.isDragging = false; });
+    async function advanceTurnOrCheckLoss(board, players, deck, smallLoopCount, completedPonds, logs) {
+      const s = local.gameState;
+      if (deck.length === 0) {
+        const anyoneCanPlay = players.some(p => hasAnyPlayableCard(board, p.hand));
+        if (!anyoneCanPlay) {
+          logs.push('💔 山札が尽き、誰も出せるカードがなくなりました…ゲームオーバー。');
+          await saveState({ board, players, status: 'lost', smallLoopCount, completedPonds, logs: logs.slice(-30) });
+          return;
+        }
+      }
+      const nextIdx = (s.turnIndex + 1) % players.length;
+      const nextPhase = deck.length > 0 ? 'draw' : 'place';
+      await saveState({
+        board, players, turnIndex: nextIdx, phase: nextPhase, turnCount: s.turnCount + 1,
+        smallLoopCount, completedPonds, logs: logs.slice(-30)
+      });
+    }
 
-boardContainer.addEventListener('wheel', (e) => {
-  e.preventDefault();
-  local.zoom = Math.min(2.4, Math.max(0.45, local.zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
-  updateViewportTransform();
-}, { passive: false });
+    function renderAll() {
+      const s = local.gameState;
+      if (!s) return;
+      const currentP = s.players[s.turnIndex];
+      $('turn-count').textContent = s.turnCount;
+      $('current-player-name').textContent = currentP ? currentP.name : '-';
+      $('deck-count').textContent = s.deck.length;
+      $('small-loop-count').textContent = s.smallLoopCount || 0;
+      $('pond-count').textContent = s.completedPonds || 0;
+      $('player-count').textContent = s.players.length;
+      $('players-list').innerHTML = s.players.map((p, idx) =>
+        `<li class="${idx === s.turnIndex ? 'active-turn' : ''}"><span>${idx === s.turnIndex ? '▶ ' : ''}${escapeHtml(p.name)}${p.id === local.playerId ? ' (あなた)' : ''}</span><span>手札${p.hand.length}枚</span></li>`
+      ).join('');
+      const logBox = $('action-log');
+      logBox.innerHTML = (s.logs || []).map(l => `<div>• ${escapeHtml(l)}</div>`).join('');
+      logBox.scrollTop = logBox.scrollHeight;
+      renderTurnControls();
+      renderHand();
+      renderBoard();
+      if ((s.status === 'won' || s.status === 'lost') && !local.resultShown) {
+        local.resultShown = true;
+        $('result-title').textContent = s.status === 'won' ? '🎉 街づくり大成功！（勝利）' : '💔 ゲームオーバー';
+        $('result-desc').textContent = s.status === 'won'
+          ? `${s.winLoopTiles.length}枚の道で大きな輪を完成させました！`
+          : '山札がなくなり、誰も配置できるカードがなくなりました。';
+        $('result-modal').classList.remove('hidden');
+      }
+    }
 
-$('zoom-in-btn').onclick = () => { local.zoom = Math.min(2.4, local.zoom * 1.15); updateViewportTransform(); };
-$('zoom-out-btn').onclick = () => { local.zoom = Math.max(0.45, local.zoom * 0.85); updateViewportTransform(); };
-$('reset-view-btn').onclick = resetView;
-window.addEventListener('resize', updateViewportTransform);
+    function renderTurnControls() {
+      const s = local.gameState;
+      const myTurn = isMyTurn();
+      const me = s.players.find(p => p.id === local.playerId);
+      $('draw-btn').classList.add('hidden');
+      $('skip-btn').classList.add('hidden');
+      $('rotate-btn').disabled = true;
+      if (s.status !== 'playing') {
+        $('turn-instruction').textContent = s.status === 'won' ? '勝利！大きな輪が完成しました！' : 'ゲーム終了';
+        return;
+      }
+      if (!myTurn) {
+        $('turn-instruction').textContent = `${s.players[s.turnIndex].name} さんの手番です...`;
+        return;
+      }
+      if (s.phase === 'draw') {
+        $('turn-instruction').textContent = 'あなたの番です！まず山札から1枚引いてください。';
+        $('draw-btn').classList.remove('hidden');
+      } else {
+        const canPlay = me ? hasAnyPlayableCard(s.board, me.hand) : false;
+        $('rotate-btn').disabled = local.selectedHandIdx === null;
+        if (canPlay) {
+          $('turn-instruction').textContent = '手札を選び、回転させて緑の枠に配置してください。';
+        } else {
+          $('turn-instruction').textContent = '手札のどのカードも置ける場所がありません。';
+          $('skip-btn').classList.remove('hidden');
+        }
+      }
+    }
 
-// 退出・モーダル
-$('close-result-btn').onclick = () => $('result-modal').classList.add('hidden');
-$('leave-btn').onclick = $('back-lobby-btn').onclick = () => location.reload();
+    function renderHand() {
+      const s = local.gameState;
+      const me = s.players.find(p => p.id === local.playerId);
+      const container = $('hand-container');
+      if (!me) { container.innerHTML = ''; return; }
+      const canSelect = isMyTurn() && s.phase === 'place';
+      container.innerHTML = me.hand.map((type, idx) => {
+        const isSel = idx === local.selectedHandIdx;
+        const rot = isSel ? local.currentRot : 0;
+        return `<div class="hand-card ${isSel ? 'selected' : ''}" data-idx="${idx}"><div class="card-svg-wrap">${createCardPreviewSVG(type, rot)}</div><div class="card-name">${CARD_DEFS[type].name}</div></div>`;
+      }).join('');
+      container.querySelectorAll('.hand-card').forEach(el => {
+        el.onclick = () => {
+          if (!canSelect) return;
+          const idx = Number(el.dataset.idx);
+          if (local.selectedHandIdx === idx) rotateSelected();
+          else {
+            local.selectedHandIdx = idx;
+            local.currentRot = 0;
+            local.pendingSlot = null;
+            $('confirm-bar').classList.add('hidden');
+            renderAll();
+          }
+        };
+      });
+    }
 
-function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
-}
+    function renderBoard() {
+      const s = local.gameState;
+      const vp = $('board-viewport');
+      const winSet = new Set(s.winLoopTiles || []);
+      let html = '';
+      for (const [key, tile] of Object.entries(s.board)) {
+        const [q, r] = key.split(',').map(Number);
+        const { x, y } = hexToPixel(q, r);
+        const cls = winSet.has(key) ? 'win-highlight' : '';
+        html += `<g class="${cls}" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">${renderCardInnerSVG(tile.type, tile.rot)}</g>`;
+      }
+      if (isMyTurn() && s.phase === 'place' && local.selectedHandIdx !== null) {
+        const me = s.players[s.turnIndex];
+        const selType = me.hand[local.selectedHandIdx];
+        if (selType) {
+          const slots = getValidPlacements(s.board, selType, local.currentRot);
+          for (const { q, r } of slots) {
+            const { x, y } = hexToPixel(q, r);
+            const isPending = local.pendingSlot && local.pendingSlot.q === q && local.pendingSlot.r === r;
+            if (isPending) {
+              html += `<g opacity="0.85" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">${renderCardInnerSVG(selType, local.currentRot)}<polygon points="${HEX_POINTS}" fill="none" stroke="#15803d" stroke-width="3" /></g>`;
+            } else {
+              html += `<polygon class="valid-slot" data-q="${q}" data-r="${r}" points="${HEX_POINTS}" transform="translate(${x.toFixed(1)},${y.toFixed(1)})" />`;
+            }
+          }
+        }
+      }
+      vp.innerHTML = html;
+      updateViewportTransform();
+      vp.querySelectorAll('.valid-slot').forEach(el => {
+        el.onclick = () => {
+          if (local.dragMoved) return;
+          local.pendingSlot = { q: Number(el.dataset.q), r: Number(el.dataset.r) };
+          $('confirm-bar').classList.remove('hidden');
+          renderBoard();
+        };
+      });
+    }
+
+    const boardContainer = $('board-container');
+    function updateViewportTransform() {
+      const rect = boardContainer.getBoundingClientRect();
+      const cx = rect.width / 2 + local.panX;
+      const cy = rect.height / 2 + local.panY;
+      $('board-viewport').setAttribute('transform', `translate(${cx.toFixed(1)},${cy.toFixed(1)}) scale(${local.zoom})`);
+    }
+    function resetView() { local.panX = 0; local.panY = 40; local.zoom = 1.15; updateViewportTransform(); }
+
+    boardContainer.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.map-controls') || e.target.closest('.confirm-bar')) return;
+      local.isDragging = true; local.dragMoved = false;
+      local.lastMouse = { x: e.clientX, y: e.clientY };
+    });
+    window.addEventListener('pointermove', (e) => {
+      if (!local.isDragging) return;
+      const dx = e.clientX - local.lastMouse.x;
+      const dy = e.clientY - local.lastMouse.y;
+      if (Math.hypot(dx, dy) > 4) local.dragMoved = true;
+      local.panX += dx; local.panY += dy;
+      local.lastMouse = { x: e.clientX, y: e.clientY };
+      updateViewportTransform();
+    });
+    window.addEventListener('pointerup', () => { local.isDragging = false; });
+    boardContainer.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      local.zoom = Math.min(2.4, Math.max(0.45, local.zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
+      updateViewportTransform();
+    }, { passive: false });
+
+    $('zoom-in-btn').onclick = () => { local.zoom = Math.min(2.4, local.zoom * 1.15); updateViewportTransform(); };
+    $('zoom-out-btn').onclick = () => { local.zoom = Math.max(0.45, local.zoom * 0.85); updateViewportTransform(); };
+    $('reset-view-btn').onclick = resetView;
+    window.addEventListener('resize', updateViewportTransform);
+    $('close-result-btn').onclick = () => $('result-modal').classList.add('hidden');
+    $('leave-btn').onclick = $('back-lobby-btn').onclick = () => location.reload();
+
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
+    }
+  </script>
+</body>
+</html>
