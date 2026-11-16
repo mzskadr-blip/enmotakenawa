@@ -87,10 +87,11 @@
     .badge { background: #e8dec8; padding: 2px 8px; border-radius: 10px; font-size: 0.78rem; margin-left: 4px; }
     .status-items { display: flex; gap: 6px; flex-wrap: wrap; }
     .stat-pill { background: #f6efe0; padding: 3px 8px; border-radius: 12px; font-size: 0.8rem; }
+    .stat-pill.done { background: #d4edda; color: #155724; }
 
     .main-area { flex: 1; display: flex; min-height: 0; }
     .side-panel {
-      width: 220px; background: var(--panel); border-right: 2px solid var(--border);
+      width: 225px; background: var(--panel); border-right: 2px solid var(--border);
       padding: 10px; display: flex; flex-direction: column; gap: 8px; overflow-y: auto;
     }
     .side-panel h4 { margin: 0 0 4px; font-size: 0.88rem; color: #5b4b3c; }
@@ -101,6 +102,7 @@
     }
     #players-list li.active-turn { background: #dff2dc; border: 1px solid var(--primary); font-weight: bold; }
     .goal-box { background: #f4f9f2; border: 1px solid #c5dfc0; border-radius: 8px; padding: 8px; font-size: 0.78rem; }
+    .goal-box ul { margin: 4px 0; padding-left: 16px; }
     .goal-box .hint { color: #6c6052; margin-bottom: 0; }
     .log-box {
       flex: 1; background: #faf6ed; border: 1px solid var(--border); border-radius: 8px;
@@ -123,6 +125,11 @@
       cursor: pointer; transition: fill 0.15s;
     }
     .valid-slot:hover { fill: rgba(79, 138, 75, 0.45); }
+    .override-slot {
+      fill: rgba(56, 189, 248, 0.28); stroke: #0284c7; stroke-width: 2.5; stroke-dasharray: 4,2;
+      cursor: pointer; transition: fill 0.15s;
+    }
+    .override-slot:hover { fill: rgba(56, 189, 248, 0.5); }
     .win-highlight { stroke: #f59e0b; stroke-width: 4; filter: drop-shadow(0 0 6px #fbbf24); }
 
     .bottom-bar {
@@ -160,7 +167,7 @@
   <div id="lobby-screen" class="screen">
     <div class="lobby-card">
       <h1>縁もたけな輪 <span class="ver">Ver.0.1</span></h1>
-      <p class="subtitle">みんなで協力して、大きな輪の街をつくろう！（1〜8人）</p>
+      <p class="subtitle">みんなで協力して、大きな輪と川の街をつくろう！（1〜8人）</p>
 
       <div id="firebase-warning" class="warning-box hidden">
         ※ Firebase設定が未入力です。オンライン通信を使う場合はコード内の <code>firebaseConfig</code> を書き換えてください。（下の「オフラインで遊ぶ」は今すぐ試せます）
@@ -204,7 +211,8 @@
         <div class="stat-pill">ターン: <strong id="turn-count">1</strong></div>
         <div class="stat-pill">手番: <strong id="current-player-name">-</strong></div>
         <div class="stat-pill">山札: <strong id="deck-count">0</strong>枚</div>
-        <div class="stat-pill">小ループ: <strong id="small-loop-count">0</strong></div>
+        <div id="pill-loop" class="stat-pill">大ループ: <strong id="big-loop-status">未</strong></div>
+        <div id="pill-river" class="stat-pill">川完成: <strong id="river-status">未</strong></div>
         <div class="stat-pill">完成池: <strong id="pond-count">0</strong></div>
       </div>
       <button id="leave-btn" class="btn small secondary">退出</button>
@@ -215,9 +223,12 @@
         <h4>参加者 (<span id="player-count">1</span>/8)</h4>
         <ul id="players-list"></ul>
         <div class="goal-box">
-          <h4>勝利条件</h4>
-          <p>太い「メインの道」を繋げて、<strong>8枚以上の大きな輪</strong>を完成させよう！</p>
-          <p class="hint">※細いサブの道はメインには繋がりません。川は矢印の向きに合わせて繋ぎます。</p>
+          <h4>勝利条件（両方達成）</h4>
+          <ul>
+            <li>メインの道で<strong>8枚以上の輪</strong></li>
+            <li>滝〜<strong>完成した池</strong>まで川が繋がる</li>
+          </ul>
+          <p class="hint">※橋は空きマスにも、既存の「メイン直線」の上にも置けます（水色枠）。</p>
         </div>
         <div id="action-log" class="log-box"></div>
       </aside>
@@ -232,7 +243,7 @@
           <button id="reset-view-btn" class="btn small secondary">中央</button>
         </div>
         <div id="confirm-bar" class="confirm-bar hidden">
-          <span>ここに配置？</span>
+          <span id="confirm-msg">ここに配置？</span>
           <button id="confirm-place-btn" class="btn primary small">確定</button>
           <button id="cancel-place-btn" class="btn secondary small">取消</button>
         </div>
@@ -297,8 +308,8 @@
     const CARD_DEFS = {
       waterfall: {
         name: '滝（起点）', category: 'river',
-        edges: ['river_out', 'grass', 'grass', 'grass', 'grass', 'grass'],
-        mainEdges: [], subEdges: [], riverIns: [], riverOuts: [0], isWaterfall: true
+        edges: ['river', 'grass', 'grass', 'grass', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverEdges: [0], isWaterfall: true
       },
       main_straight: {
         name: 'メイン直線', category: 'road',
@@ -356,34 +367,24 @@
         mainEdges: [], subEdges: [0]
       },
       bridge: {
-        name: '橋（メイン道＋川）', category: 'bridge',
-        edges: ['main', 'river_in', 'grass', 'main', 'river_out', 'grass'],
-        mainEdges: [0, 3], subEdges: [], riverIns: [1], riverOuts: [4], isBridge: true
+        name: '橋（メイン直線＋川）', category: 'bridge',
+        edges: ['main', 'river', 'grass', 'main', 'river', 'grass'],
+        mainEdges: [0, 3], subEdges: [], riverEdges: [1, 4], isBridge: true
       },
       river_straight: {
         name: '川（直線）', category: 'river',
-        edges: ['river_in', 'grass', 'grass', 'river_out', 'grass', 'grass'],
-        mainEdges: [], subEdges: [], riverIns: [0], riverOuts: [3]
+        edges: ['river', 'grass', 'grass', 'river', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverEdges: [0, 3]
       },
       river_curve: {
-        name: '川（カーブ）', category: 'river',
-        edges: ['river_in', 'grass', 'river_out', 'grass', 'grass', 'grass'],
-        mainEdges: [], subEdges: [], riverIns: [0], riverOuts: [2]
+        name: '川（ゆるカーブ）', category: 'river',
+        edges: ['river', 'grass', 'river', 'grass', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverEdges: [0, 2]
       },
       river_curve_sharp: {
         name: '川（急カーブ）', category: 'river',
-        edges: ['river_in', 'river_out', 'grass', 'grass', 'grass', 'grass'],
-        mainEdges: [], subEdges: [], riverIns: [0], riverOuts: [1]
-      },
-      river_fork: {
-        name: '川（分岐）', category: 'river',
-        edges: ['river_in', 'grass', 'river_out', 'grass', 'river_out', 'grass'],
-        mainEdges: [], subEdges: [], riverIns: [0], riverOuts: [2, 4]
-      },
-      river_merge: {
-        name: '川（合流）', category: 'river',
-        edges: ['river_in', 'grass', 'river_in', 'river_out', 'grass', 'grass'],
-        mainEdges: [], subEdges: [], riverIns: [0, 2], riverOuts: [3]
+        edges: ['river', 'river', 'grass', 'grass', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverEdges: [0, 1]
       },
       pond_1: {
         name: '池（1辺）', category: 'pond',
@@ -396,23 +397,33 @@
         mainEdges: [], subEdges: []
       },
       pond_1_river: {
-        name: '池（川流入口つき1辺）', category: 'pond',
-        edges: ['pond', 'grass', 'grass', 'river_in', 'grass', 'grass'],
-        mainEdges: [], subEdges: [], riverIns: [3], riverOuts: []
+        name: '池（川口つき1辺）', category: 'pond',
+        edges: ['pond', 'grass', 'grass', 'river', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverEdges: [3]
       },
       pond_2_adj_river: {
-        name: '池（川流入口つき2辺）', category: 'pond',
-        edges: ['pond', 'pond', 'grass', 'river_in', 'grass', 'grass'],
-        mainEdges: [], subEdges: [], riverIns: [3], riverOuts: []
+        name: '池（川口つき2辺）', category: 'pond',
+        edges: ['pond', 'pond', 'grass', 'river', 'grass', 'grass'],
+        mainEdges: [], subEdges: [], riverEdges: [3]
       }
     };
+
+    /* 橋の6パターン (道3方向 × 川交差2方向) */
+    const BRIDGE_VARIANTS = [
+      { mainEdges: [0, 3], riverEdges: [1, 4] },
+      { mainEdges: [0, 3], riverEdges: [2, 5] },
+      { mainEdges: [1, 4], riverEdges: [2, 5] },
+      { mainEdges: [1, 4], riverEdges: [0, 3] },
+      { mainEdges: [2, 5], riverEdges: [0, 3] },
+      { mainEdges: [2, 5], riverEdges: [1, 4] }
+    ];
 
     const DECK_RECIPE = {
       main_straight: 10, main_curve_wide: 10, main_curve_sharp: 5,
       main_rotary_3: 3, main_rotary_4: 2, main_cross: 2, main_t_junction: 2, main_deadend: 2,
       sub_straight: 1, sub_curve: 1, sub_deadend: 1,
       bridge: 5,
-      river_straight: 3, river_curve: 3, river_curve_sharp: 1, river_fork: 2, river_merge: 1,
+      river_straight: 5, river_curve: 5, river_curve_sharp: 2,
       pond_2_adj: 3, pond_1: 2, pond_1_river: 2, pond_2_adj_river: 1
     };
 
@@ -437,7 +448,7 @@
       };
     }
 
-    /* === 3. 六角形ロジック・ループ判定 === */
+    /* === 3. 六角形ロジック・ループ判定・川完成判定 === */
     const DIRS = [[0, -1], [1, -1], [1, 0], [0, 1], [-1, 1], [-1, 0]];
     const HEX_SIZE = 46;
 
@@ -453,22 +464,48 @@
       };
     }
     function oppositeDir(d) { return (d + 3) % 6; }
+
     function getRotatedEdges(type, rot) {
+      if (type === 'bridge') {
+        const v = BRIDGE_VARIANTS[rot % 6];
+        const arr = ['grass', 'grass', 'grass', 'grass', 'grass', 'grass'];
+        v.mainEdges.forEach(i => arr[i] = 'main');
+        v.riverEdges.forEach(i => arr[i] = 'river');
+        return arr;
+      }
       const edges = CARD_DEFS[type].edges;
       return edges.map((_, i) => edges[(i - rot + 6) % 6]);
     }
-    function getRotatedIndices(indices, rot) {
-      return (indices || []).map(i => (i + rot) % 6);
+
+    function getRotatedMainEdges(type, rot) {
+      if (type === 'bridge') return BRIDGE_VARIANTS[rot % 6].mainEdges;
+      return (CARD_DEFS[type].mainEdges || []).map(i => (i + rot) % 6);
     }
+
+    function getRotatedRiverEdges(type, rot) {
+      if (type === 'bridge') return BRIDGE_VARIANTS[rot % 6].riverEdges;
+      return (CARD_DEFS[type].riverEdges || []).map(i => (i + rot) % 6);
+    }
+
     function canEdgesConnect(edgeA, edgeB) {
-      if (edgeA === 'river_in') return edgeB === 'river_out';
-      if (edgeA === 'river_out') return edgeB === 'river_in';
       return edgeA === edgeB;
     }
+
+    /* 空きマスへの配置 または メイン直線への橋上書きを判定 */
     function canPlaceCard(board, q, r, type, rot) {
       const key = hexKey(q, r);
-      if (board[key]) return false;
+      const existing = board[key];
       const myEdges = getRotatedEdges(type, rot);
+
+      if (existing) {
+        if (type !== 'bridge' || existing.type !== 'main_straight') return false;
+        const oldEdges = getRotatedEdges(existing.type, existing.rot);
+        for (let d = 0; d < 6; d++) {
+          if (oldEdges[d] === 'main' && myEdges[d] !== 'main') return false;
+          if (oldEdges[d] !== 'main' && myEdges[d] === 'main') return false;
+        }
+      }
+
       let hasNeighbor = false;
       for (let d = 0; d < 6; d++) {
         const neighbor = board[hexKey(q + DIRS[d][0], r + DIRS[d][1])];
@@ -477,11 +514,15 @@
         const nbEdges = getRotatedEdges(neighbor.type, neighbor.rot);
         if (!canEdgesConnect(myEdges[d], nbEdges[oppositeDir(d)])) return false;
       }
-      return hasNeighbor;
+      return existing ? true : hasNeighbor;
     }
-    function getCandidateCoords(board) {
+
+    function getCandidateCoords(board, type) {
       const candidates = new Set();
-      for (const key of Object.keys(board)) {
+      for (const [key, tile] of Object.entries(board)) {
+        if (type === 'bridge' && tile.type === 'main_straight') {
+          candidates.add(key);
+        }
         const { q, r } = parseKey(key);
         for (const [dq, dr] of DIRS) {
           const nk = hexKey(q + dq, r + dr);
@@ -490,11 +531,13 @@
       }
       return Array.from(candidates).map(parseKey);
     }
+
     function getValidPlacements(board, type, rot) {
-      return getCandidateCoords(board).filter(({ q, r }) => canPlaceCard(board, q, r, type, rot));
+      return getCandidateCoords(board, type).filter(({ q, r }) => canPlaceCard(board, q, r, type, rot));
     }
+
     function canPlaceCardAnyRot(board, type) {
-      const coords = getCandidateCoords(board);
+      const coords = getCandidateCoords(board, type);
       for (const { q, r } of coords) {
         for (let rot = 0; rot < 6; rot++) {
           if (canPlaceCard(board, q, r, type, rot)) return true;
@@ -502,13 +545,15 @@
       }
       return false;
     }
+
     function hasAnyPlayableCard(board, hand) {
       return hand.some(type => canPlaceCardAnyRot(board, type));
     }
+
     function detectMainRoadLoops(board) {
       const adj = new Map();
       for (const [key, tile] of Object.entries(board)) {
-        const mainEdges = getRotatedIndices(CARD_DEFS[tile.type].mainEdges, tile.rot);
+        const mainEdges = getRotatedMainEdges(tile.type, tile.rot);
         if (mainEdges.length < 2) continue;
         const { q, r } = parseKey(key);
         const neighbors = [];
@@ -516,7 +561,7 @@
           const nk = hexKey(q + DIRS[d][0], r + DIRS[d][1]);
           const nTile = board[nk];
           if (!nTile) continue;
-          const nMain = getRotatedIndices(CARD_DEFS[nTile.type].mainEdges, nTile.rot);
+          const nMain = getRotatedMainEdges(nTile.type, nTile.rot);
           if (nMain.includes(oppositeDir(d))) neighbors.push(nk);
         }
         if (neighbors.length >= 2) adj.set(key, neighbors);
@@ -569,8 +614,10 @@
       }
       return { bigLoop, smallLoopCount: smallLoopSignatures.size };
     }
+
     function detectCompletedPonds(board) {
       const visited = new Set();
+      const completedPondKeys = new Set();
       let completedCount = 0;
       for (const [key, tile] of Object.entries(board)) {
         const edges = getRotatedEdges(tile.type, tile.rot);
@@ -593,9 +640,43 @@
             else if (!visited.has(nk)) { visited.add(nk); queue.push(nk); }
           }
         }
-        if (isClosed && group.length >= GAME_CONFIG.POND_MIN_TILES) completedCount++;
+        if (isClosed && group.length >= GAME_CONFIG.POND_MIN_TILES) {
+          completedCount++;
+          group.forEach(k => completedPondKeys.add(k));
+        }
       }
-      return completedCount;
+      return { completedCount, completedPondKeys };
+    }
+
+    /* 滝から途切れずに完成した池まで川が繋がっているか判定 */
+    function detectRiverCompleted(board, completedPondKeys) {
+      const waterfallKey = Object.keys(board).find(k => CARD_DEFS[board[k].type].isWaterfall);
+      if (!waterfallKey) return false;
+
+      const visited = new Set([waterfallKey]);
+      const queue = [waterfallKey];
+      let hasOpenEnd = false;
+      let reachedCompletedPond = false;
+
+      while (queue.length > 0) {
+        const curr = queue.shift();
+        const tile = board[curr];
+        const { q, r } = parseKey(curr);
+        if (completedPondKeys.has(curr)) reachedCompletedPond = true;
+
+        const rEdges = getRotatedRiverEdges(tile.type, tile.rot);
+        for (const d of rEdges) {
+          const nk = hexKey(q + DIRS[d][0], r + DIRS[d][1]);
+          const nb = board[nk];
+          if (!nb) {
+            hasOpenEnd = true;
+          } else if (!visited.has(nk)) {
+            visited.add(nk);
+            queue.push(nk);
+          }
+        }
+      }
+      return reachedCompletedPond && !hasOpenEnd;
     }
 
     /* === 4. SVGカード描画 === */
@@ -615,18 +696,28 @@
       [-R * 0.75, -(R * SQRT3) / 4]
     ];
     function edgeVertexPair(d) { return [VERTICES[(d + 4) % 6], VERTICES[(d + 5) % 6]]; }
-    function renderRiverArrow(d, isOut) {
-      const [mx, my] = EDGE_MIDS[d];
-      const dist = Math.hypot(mx, my);
-      const cx = mx * 0.68, cy = my * 0.68;
-      const dir = isOut ? 1 : -1;
-      const angle = Math.atan2((my / dist) * dir, (mx / dist) * dir) * (180 / Math.PI);
-      return `<polygon points="5,0 -3,-3.5 -3,3.5" fill="#ffffff" opacity="0.92" transform="translate(${cx.toFixed(1)},${cy.toFixed(1)}) rotate(${angle.toFixed(1)})" />`;
-    }
+
     function renderCardInnerSVG(type, rot = 0) {
       const def = CARD_DEFS[type];
       const layers = [];
       layers.push(`<polygon points="${HEX_POINTS}" fill="#b7de8d" stroke="#76a34c" stroke-width="2" />`);
+
+      /* 橋は6パターンを直接描画 */
+      if (def.isBridge) {
+        const v = BRIDGE_VARIANTS[rot % 6];
+        for (const d of v.riverEdges) {
+          const [mx, my] = EDGE_MIDS[d];
+          layers.push(`<path d="M ${mx.toFixed(1)},${my.toFixed(1)} L 0,0" stroke="#0284c7" stroke-width="12" fill="none" stroke-linecap="round" />`);
+          layers.push(`<path d="M ${mx.toFixed(1)},${my.toFixed(1)} L 0,0" stroke="#38bdf8" stroke-width="9" fill="none" stroke-linecap="round" />`);
+        }
+        const [m1x, m1y] = EDGE_MIDS[v.mainEdges[0]];
+        const [m2x, m2y] = EDGE_MIDS[v.mainEdges[1]];
+        layers.push(`<line x1="${m1x.toFixed(1)}" y1="${m1y.toFixed(1)}" x2="${m2x.toFixed(1)}" y2="${m2y.toFixed(1)}" stroke="#5c3a21" stroke-width="17" />`);
+        layers.push(`<line x1="${(m1x*0.55).toFixed(1)}" y1="${(m1y*0.55).toFixed(1)}" x2="${(m2x*0.55).toFixed(1)}" y2="${(m2y*0.55).toFixed(1)}" stroke="#a47148" stroke-width="15" stroke-dasharray="3,2" />`);
+        layers.push(`<line x1="${m1x.toFixed(1)}" y1="${m1y.toFixed(1)}" x2="${m2x.toFixed(1)}" y2="${m2y.toFixed(1)}" stroke="#f6e7c1" stroke-width="10" />`);
+        return `<g>${layers.join('')}</g>`;
+      }
+
       const pondEdges = def.edges.map((e, i) => (e === 'pond' ? i : -1)).filter(i => i >= 0);
       if (pondEdges.length > 0) {
         for (const d of pondEdges) {
@@ -637,10 +728,9 @@
         }
         layers.push(`<circle cx="0" cy="0" r="10" fill="#4cc3f0" />`);
       }
-      const ins = def.riverIns || [];
-      const outs = def.riverOuts || [];
-      if (ins.length > 0 || outs.length > 0) {
-        const riverPts = [...ins, ...outs];
+
+      const riverPts = def.riverEdges || [];
+      if (riverPts.length > 0) {
         for (const d of riverPts) {
           const [mx, my] = EDGE_MIDS[d];
           const stopFactor = pondEdges.length > 0 ? 0.3 : 0;
@@ -648,14 +738,14 @@
           layers.push(`<path d="M ${mx.toFixed(1)},${my.toFixed(1)} Q 0,0 ${(mx*stopFactor).toFixed(1)},${(my*stopFactor).toFixed(1)}" stroke="#38bdf8" stroke-width="9" fill="none" stroke-linecap="round" />`);
         }
         if (riverPts.length > 1 && pondEdges.length === 0) layers.push(`<circle cx="0" cy="0" r="5" fill="#38bdf8" />`);
-        for (const d of ins) layers.push(renderRiverArrow(d, false));
-        for (const d of outs) layers.push(renderRiverArrow(d, true));
       }
+
       if (def.isWaterfall) {
         layers.push(`<circle cx="0" cy="-2" r="14" fill="#8b7d70" stroke="#5e5248" stroke-width="1.5" />`);
         layers.push(`<circle cx="0" cy="2" r="10" fill="#e0f7ff" />`);
         layers.push(`<text x="0" y="3" text-anchor="middle" font-size="11" fill="#0369a1" font-weight="bold">滝</text>`);
       }
+
       if (def.subEdges && def.subEdges.length > 0) {
         for (const d of def.subEdges) {
           const [mx, my] = EDGE_MIDS[d];
@@ -663,34 +753,28 @@
           layers.push(`<line x1="0" y1="0" x2="${mx.toFixed(1)}" y2="${my.toFixed(1)}" stroke="#d9b98c" stroke-width="4" stroke-linecap="round" />`);
         }
       }
+
       if (def.mainEdges && def.mainEdges.length > 0) {
-        if (def.isBridge) {
-          const [m1x, m1y] = EDGE_MIDS[def.mainEdges[0]];
-          const [m2x, m2y] = EDGE_MIDS[def.mainEdges[1]];
-          layers.push(`<line x1="${m1x.toFixed(1)}" y1="${m1y.toFixed(1)}" x2="${m2x.toFixed(1)}" y2="${m2y.toFixed(1)}" stroke="#5c3a21" stroke-width="17" />`);
-          layers.push(`<line x1="${(m1x*0.55).toFixed(1)}" y1="${(m1y*0.55).toFixed(1)}" x2="${(m2x*0.55).toFixed(1)}" y2="${(m2y*0.55).toFixed(1)}" stroke="#a47148" stroke-width="15" stroke-dasharray="3,2" />`);
-          layers.push(`<line x1="${m1x.toFixed(1)}" y1="${m1y.toFixed(1)}" x2="${m2x.toFixed(1)}" y2="${m2y.toFixed(1)}" stroke="#f6e7c1" stroke-width="10" />`);
-        } else {
-          for (const d of def.mainEdges) {
-            const [mx, my] = EDGE_MIDS[d];
-            layers.push(`<line x1="0" y1="0" x2="${mx.toFixed(1)}" y2="${my.toFixed(1)}" stroke="#6e5438" stroke-width="15" stroke-linecap="round" />`);
-          }
-          for (const d of def.mainEdges) {
-            const [mx, my] = EDGE_MIDS[d];
-            layers.push(`<line x1="0" y1="0" x2="${mx.toFixed(1)}" y2="${my.toFixed(1)}" stroke="#f6e7c1" stroke-width="11" stroke-linecap="round" />`);
-          }
-          if (def.isRotary) {
-            layers.push(`<circle cx="0" cy="0" r="14" fill="#6e5438" />`);
-            layers.push(`<circle cx="0" cy="0" r="12" fill="#f6e7c1" />`);
-            layers.push(`<circle cx="0" cy="0" r="5" fill="#76a34c" />`);
-          } else if (def.mainEdges.length === 1) {
-            layers.push(`<circle cx="0" cy="0" r="7" fill="#6e5438" />`);
-            layers.push(`<circle cx="0" cy="0" r="5" fill="#f6e7c1" />`);
-          }
+        for (const d of def.mainEdges) {
+          const [mx, my] = EDGE_MIDS[d];
+          layers.push(`<line x1="0" y1="0" x2="${mx.toFixed(1)}" y2="${my.toFixed(1)}" stroke="#6e5438" stroke-width="15" stroke-linecap="round" />`);
+        }
+        for (const d of def.mainEdges) {
+          const [mx, my] = EDGE_MIDS[d];
+          layers.push(`<line x1="0" y1="0" x2="${mx.toFixed(1)}" y2="${my.toFixed(1)}" stroke="#f6e7c1" stroke-width="11" stroke-linecap="round" />`);
+        }
+        if (def.isRotary) {
+          layers.push(`<circle cx="0" cy="0" r="14" fill="#6e5438" />`);
+          layers.push(`<circle cx="0" cy="0" r="12" fill="#f6e7c1" />`);
+          layers.push(`<circle cx="0" cy="0" r="5" fill="#76a34c" />`);
+        } else if (def.mainEdges.length === 1) {
+          layers.push(`<circle cx="0" cy="0" r="7" fill="#6e5438" />`);
+          layers.push(`<circle cx="0" cy="0" r="5" fill="#f6e7c1" />`);
         }
       }
       return `<g transform="rotate(${rot * 60})">${layers.join('')}</g>`;
     }
+
     function createCardPreviewSVG(type, rot = 0) {
       return `<svg viewBox="-50 -46 100 92" width="100%" height="100%">${renderCardInnerSVG(type, rot)}</svg>`;
     }
@@ -735,7 +819,8 @@
         status: 'playing', hostId: local.playerId,
         players: [{ id: local.playerId, name, hand }],
         turnIndex: 0, phase: 'draw', turnCount: 1, deck,
-        board: createInitialBoard(), smallLoopCount: 0, completedPonds: 0, winLoopTiles: [],
+        board: createInitialBoard(), smallLoopCount: 0, completedPonds: 0,
+        bigLoopDone: false, riverDone: false, winLoopTiles: [],
         logs: ['オフライン（1人プレイ）を開始しました！']
       };
       enterGameScreen();
@@ -761,7 +846,8 @@
               status: 'lobby', hostId: local.playerId,
               players: [{ id: local.playerId, name, hand: [] }],
               turnIndex: 0, phase: 'draw', turnCount: 1, deck: [],
-              board: createInitialBoard(), smallLoopCount: 0, completedPonds: 0, winLoopTiles: [],
+              board: createInitialBoard(), smallLoopCount: 0, completedPonds: 0,
+              bigLoopDone: false, riverDone: false, winLoopTiles: [],
               logs: [`${name} がルーム ${roomId} を作成しました。`]
             });
           } else {
@@ -795,7 +881,8 @@
       const players = state.players.map(p => ({ ...p, hand: deck.splice(0, GAME_CONFIG.INITIAL_HAND_SIZE) }));
       await saveState({
         status: 'playing', players, deck, board: createInitialBoard(),
-        turnIndex: 0, phase: 'draw', turnCount: 1, smallLoopCount: 0, completedPonds: 0, winLoopTiles: [],
+        turnIndex: 0, phase: 'draw', turnCount: 1, smallLoopCount: 0, completedPonds: 0,
+        bigLoopDone: false, riverDone: false, winLoopTiles: [],
         logs: [...(state.logs || []), 'ゲーム開始！まずは山札から1枚引きましょう。'].slice(-30)
       });
     };
@@ -864,29 +951,48 @@
       const me = players[s.turnIndex];
       const cardType = me.hand.splice(local.selectedHandIdx, 1)[0];
       const board = { ...s.board };
-      board[hexKey(local.pendingSlot.q, local.pendingSlot.r)] = {
-        type: cardType, rot: local.currentRot, placedBy: me.name
-      };
+      const key = hexKey(local.pendingSlot.q, local.pendingSlot.r);
+      const wasMainStraight = board[key]?.type === 'main_straight';
+
+      board[key] = { type: cardType, rot: local.currentRot, placedBy: me.name };
       local.selectedHandIdx = null;
       local.currentRot = 0;
       local.pendingSlot = null;
       $('confirm-bar').classList.add('hidden');
 
       const loops = detectMainRoadLoops(board);
-      const completedPonds = detectCompletedPonds(board);
-      const logs = [...(s.logs || []), `${me.name} が「${CARD_DEFS[cardType].name}」を配置しました。`];
-      if (loops.smallLoopCount > s.smallLoopCount) logs.push('✨ 小さなループが完成しました！');
-      if (completedPonds > s.completedPonds) logs.push('💧 新しい池が完成しました！');
+      const pondInfo = detectCompletedPonds(board);
+      const riverDone = detectRiverCompleted(board, pondInfo.completedPondKeys);
+      const bigLoopDone = Boolean(loops.bigLoop);
 
-      if (loops.bigLoop) {
-        logs.push(`🎉 ${GAME_CONFIG.BIG_LOOP_MIN_TILES}枚以上の大きな輪が完成！全員の勝利！`);
+      const logs = [...(s.logs || []),
+        wasMainStraight
+          ? `${me.name} が既存の直線に「橋」を架けました！`
+          : `${me.name} が「${CARD_DEFS[cardType].name}」を配置しました。`
+      ];
+      if (loops.smallLoopCount > s.smallLoopCount) logs.push('✨ 小さなループが完成しました！');
+      if (pondInfo.completedCount > s.completedPonds) logs.push('💧 新しい池が完成しました！');
+      if (bigLoopDone && !s.bigLoopDone) logs.push('🛣️ 8枚以上の大きな輪が完成しました！');
+      if (riverDone && !s.riverDone) logs.push('🌊 滝から池までの川が完成しました！');
+
+      if (bigLoopDone && riverDone) {
+        logs.push('🎉 大きな輪と川が両方完成！全員の勝利です！');
         await saveState({
-          board, players, status: 'won', winLoopTiles: loops.bigLoop,
-          smallLoopCount: loops.smallLoopCount, completedPonds, logs: logs.slice(-30)
+          board, players, status: 'won',
+          winLoopTiles: loops.bigLoop,
+          bigLoopDone: true, riverDone: true,
+          smallLoopCount: loops.smallLoopCount,
+          completedPonds: pondInfo.completedCount,
+          logs: logs.slice(-30)
         });
         return;
       }
-      await advanceTurnOrCheckLoss(board, players, s.deck, loops.smallLoopCount, completedPonds, logs);
+
+      await advanceTurnOrCheckLoss(
+        board, players, s.deck,
+        loops.smallLoopCount, pondInfo.completedCount,
+        bigLoopDone, riverDone, loops.bigLoop || [], logs
+      );
     };
 
     $('cancel-place-btn').onclick = () => {
@@ -900,16 +1006,24 @@
       const s = local.gameState;
       const me = s.players[s.turnIndex];
       const logs = [...(s.logs || []), `${me.name} は出せる場所がなくスキップしました。`];
-      await advanceTurnOrCheckLoss(s.board, s.players, s.deck, s.smallLoopCount, s.completedPonds, logs);
+      await advanceTurnOrCheckLoss(
+        s.board, s.players, s.deck,
+        s.smallLoopCount, s.completedPonds,
+        s.bigLoopDone, s.riverDone, s.winLoopTiles || [], logs
+      );
     };
 
-    async function advanceTurnOrCheckLoss(board, players, deck, smallLoopCount, completedPonds, logs) {
+    async function advanceTurnOrCheckLoss(board, players, deck, smallLoopCount, completedPonds, bigLoopDone, riverDone, winLoopTiles, logs) {
       const s = local.gameState;
       if (deck.length === 0) {
         const anyoneCanPlay = players.some(p => hasAnyPlayableCard(board, p.hand));
         if (!anyoneCanPlay) {
           logs.push('💔 山札が尽き、誰も出せるカードがなくなりました…ゲームオーバー。');
-          await saveState({ board, players, status: 'lost', smallLoopCount, completedPonds, logs: logs.slice(-30) });
+          await saveState({
+            board, players, status: 'lost',
+            smallLoopCount, completedPonds, bigLoopDone, riverDone, winLoopTiles,
+            logs: logs.slice(-30)
+          });
           return;
         }
       }
@@ -917,7 +1031,8 @@
       const nextPhase = deck.length > 0 ? 'draw' : 'place';
       await saveState({
         board, players, turnIndex: nextIdx, phase: nextPhase, turnCount: s.turnCount + 1,
-        smallLoopCount, completedPonds, logs: logs.slice(-30)
+        smallLoopCount, completedPonds, bigLoopDone, riverDone, winLoopTiles,
+        logs: logs.slice(-30)
       });
     }
 
@@ -928,8 +1043,12 @@
       $('turn-count').textContent = s.turnCount;
       $('current-player-name').textContent = currentP ? currentP.name : '-';
       $('deck-count').textContent = s.deck.length;
-      $('small-loop-count').textContent = s.smallLoopCount || 0;
       $('pond-count').textContent = s.completedPonds || 0;
+      $('big-loop-status').textContent = s.bigLoopDone ? '済✅' : '未';
+      $('river-status').textContent = s.riverDone ? '済✅' : '未';
+      $('pill-loop').classList.toggle('done', Boolean(s.bigLoopDone));
+      $('pill-river').classList.toggle('done', Boolean(s.riverDone));
+
       $('player-count').textContent = s.players.length;
       $('players-list').innerHTML = s.players.map((p, idx) =>
         `<li class="${idx === s.turnIndex ? 'active-turn' : ''}"><span>${idx === s.turnIndex ? '▶ ' : ''}${escapeHtml(p.name)}${p.id === local.playerId ? ' (あなた)' : ''}</span><span>手札${p.hand.length}枚</span></li>`
@@ -944,7 +1063,7 @@
         local.resultShown = true;
         $('result-title').textContent = s.status === 'won' ? '🎉 街づくり大成功！（勝利）' : '💔 ゲームオーバー';
         $('result-desc').textContent = s.status === 'won'
-          ? `${s.winLoopTiles.length}枚の道で大きな輪を完成させました！`
+          ? `${s.winLoopTiles.length}枚の大きな輪と、滝から池までの川を両方完成させました！`
           : '山札がなくなり、誰も配置できるカードがなくなりました。';
         $('result-modal').classList.remove('hidden');
       }
@@ -958,7 +1077,7 @@
       $('skip-btn').classList.add('hidden');
       $('rotate-btn').disabled = true;
       if (s.status !== 'playing') {
-        $('turn-instruction').textContent = s.status === 'won' ? '勝利！大きな輪が完成しました！' : 'ゲーム終了';
+        $('turn-instruction').textContent = s.status === 'won' ? '勝利！輪と川が完成しました！' : 'ゲーム終了';
         return;
       }
       if (!myTurn) {
@@ -972,7 +1091,7 @@
         const canPlay = me ? hasAnyPlayableCard(s.board, me.hand) : false;
         $('rotate-btn').disabled = local.selectedHandIdx === null;
         if (canPlay) {
-          $('turn-instruction').textContent = '手札を選び、回転させて緑の枠に配置してください。';
+          $('turn-instruction').textContent = '手札を選び、回転させて緑（橋は水色も可）の枠に配置してください。';
         } else {
           $('turn-instruction').textContent = '手札のどのカードも置ける場所がありません。';
           $('skip-btn').classList.remove('hidden');
@@ -1025,21 +1144,26 @@
           const slots = getValidPlacements(s.board, selType, local.currentRot);
           for (const { q, r } of slots) {
             const { x, y } = hexToPixel(q, r);
+            const key = hexKey(q, r);
+            const isOverride = Boolean(s.board[key]);
             const isPending = local.pendingSlot && local.pendingSlot.q === q && local.pendingSlot.r === r;
             if (isPending) {
-              html += `<g opacity="0.85" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">${renderCardInnerSVG(selType, local.currentRot)}<polygon points="${HEX_POINTS}" fill="none" stroke="#15803d" stroke-width="3" /></g>`;
+              html += `<g opacity="0.9" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">${renderCardInnerSVG(selType, local.currentRot)}<polygon points="${HEX_POINTS}" fill="none" stroke="${isOverride ? '#0284c7' : '#15803d'}" stroke-width="3" /></g>`;
             } else {
-              html += `<polygon class="valid-slot" data-q="${q}" data-r="${r}" points="${HEX_POINTS}" transform="translate(${x.toFixed(1)},${y.toFixed(1)})" />`;
+              const slotCls = isOverride ? 'override-slot' : 'valid-slot';
+              html += `<polygon class="${slotCls}" data-q="${q}" data-r="${r}" points="${HEX_POINTS}" transform="translate(${x.toFixed(1)},${y.toFixed(1)})" />`;
             }
           }
         }
       }
       vp.innerHTML = html;
       updateViewportTransform();
-      vp.querySelectorAll('.valid-slot').forEach(el => {
+      vp.querySelectorAll('.valid-slot, .override-slot').forEach(el => {
         el.onclick = () => {
           if (local.dragMoved) return;
-          local.pendingSlot = { q: Number(el.dataset.q), r: Number(el.dataset.r) };
+          const q = Number(el.dataset.q), r = Number(el.dataset.r);
+          local.pendingSlot = { q, r };
+          $('confirm-msg').textContent = s.board[hexKey(q, r)] ? '橋に変更する？' : 'ここに配置？';
           $('confirm-bar').classList.remove('hidden');
           renderBoard();
         };
