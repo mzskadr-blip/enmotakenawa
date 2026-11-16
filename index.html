@@ -14,6 +14,7 @@
       --primary-hover: #3e703b;
       --accent: #d9822b;
       --warning: #c84b31;
+      --info: #0284c7;
     }
     * { box-sizing: border-box; }
     body {
@@ -46,19 +47,30 @@
     .lobby-card h1 { margin: 0 0 6px; font-size: 1.6rem; text-align: center; color: #3c6e38; }
     .ver { font-size: 0.85rem; background: #e8f3e6; padding: 2px 8px; border-radius: 12px; }
     .subtitle { text-align: center; font-size: 0.88rem; color: #6e5e4f; margin-bottom: 18px; }
-    .warning-box {
-      background: #fff3cd; border: 1px solid #ffeeba; color: #856404;
-      padding: 10px; border-radius: 8px; font-size: 0.8rem; margin-bottom: 14px;
+    .invite-banner {
+      background: #e0f2fe; border: 1px solid #7dd3fc; color: #0369a1;
+      padding: 10px; border-radius: 8px; font-size: 0.85rem; font-weight: bold;
+      text-align: center; margin-bottom: 14px;
     }
     .form-group { margin-bottom: 14px; }
     .form-group label { display: block; font-weight: bold; font-size: 0.86rem; margin-bottom: 5px; }
     .form-group input {
       width: 100%; padding: 10px; border: 1px solid #ccbda0; border-radius: 8px; font-size: 1rem;
     }
+    .divider {
+      text-align: center; font-size: 0.8rem; color: #8c7b6b; margin: 14px 0;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
     .row-input { display: flex; gap: 8px; }
-    .lobby-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+    .row-input input { flex: 1; }
+    .lobby-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
     .waiting-room {
-      margin-top: 20px; padding-top: 16px; border-top: 2px dashed var(--border); text-align: center;
+      margin-top: 16px; padding-top: 16px; border-top: 2px dashed var(--border); text-align: center;
+    }
+    .room-code-big {
+      font-size: 1.8rem; font-weight: bold; letter-spacing: 4px; color: #3c6e38;
+      background: #eef6ed; padding: 8px 16px; border-radius: 10px; display: inline-block; margin: 6px 0;
     }
     .waiting-room ul { list-style: none; padding: 0; margin: 10px 0; text-align: left; }
     .waiting-room li {
@@ -74,6 +86,7 @@
     .btn.primary { background: var(--primary); color: #fff; }
     .btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
     .btn.accent { background: var(--accent); color: #fff; }
+    .btn.info { background: var(--info); color: #fff; }
     .btn.secondary { background: #e8dec8; color: var(--text); }
     .btn.warning { background: var(--warning); color: #fff; }
     .btn.small { padding: 6px 10px; font-size: 0.8rem; }
@@ -84,6 +97,7 @@
       background: var(--panel); border-bottom: 2px solid var(--border);
       padding: 6px 12px; gap: 8px; flex-wrap: wrap;
     }
+    .top-actions { display: flex; gap: 6px; align-items: center; }
     .badge { background: #e8dec8; padding: 2px 8px; border-radius: 10px; font-size: 0.78rem; margin-left: 4px; }
     .status-items { display: flex; gap: 6px; flex-wrap: wrap; }
     .stat-pill { background: #f6efe0; padding: 3px 8px; border-radius: 12px; font-size: 0.8rem; }
@@ -169,34 +183,48 @@
       <h1>縁もたけな輪 <span class="ver">Ver.0.1</span></h1>
       <p class="subtitle">みんなで協力して、大きな輪と川の街をつくろう！（1〜8人）</p>
 
-      <div id="firebase-warning" class="warning-box hidden">
-        ※ Firebase設定が未入力です。オンライン通信を使う場合はコード内の <code>firebaseConfig</code> を書き換えてください。（下の「オフラインで遊ぶ」は今すぐ試せます）
-      </div>
+      <div id="invite-banner" class="invite-banner hidden"></div>
 
-      <div class="form-group">
-        <label for="nickname-input">ニックネーム</label>
-        <input id="nickname-input" type="text" maxlength="12" placeholder="例：たろう" />
-      </div>
+      <div id="lobby-entry">
+        <div class="form-group">
+          <label for="nickname-input">ニックネーム</label>
+          <input id="nickname-input" type="text" maxlength="12" placeholder="例：たろう" />
+        </div>
 
-      <div class="form-group">
-        <label for="room-id-input">4桁のルームID（合言葉）</label>
-        <div class="row-input">
-          <input id="room-id-input" type="text" maxlength="4" pattern="\d{4}" placeholder="例：1234" />
-          <button id="random-room-btn" class="btn secondary" type="button">ランダム生成</button>
+        <div class="lobby-actions">
+          <button id="create-room-btn" class="btn primary">新しく部屋を作る（ID自動発行）</button>
+        </div>
+
+        <div class="divider">または 友達の部屋に入る</div>
+
+        <div class="form-group">
+          <label for="room-id-input">4桁のルームID</label>
+          <div class="row-input">
+            <input id="room-id-input" type="text" maxlength="4" inputmode="numeric" placeholder="例：1234" />
+            <button id="join-room-btn" class="btn info" type="button">参加する</button>
+          </div>
+        </div>
+
+        <div class="divider">1人で遊ぶ</div>
+
+        <div class="lobby-actions">
+          <button id="start-offline-btn" class="btn accent">オフライン（1人プレイ）で遊ぶ</button>
         </div>
       </div>
 
-      <div class="lobby-actions">
-        <button id="join-online-btn" class="btn primary">ルームを作成 / 参加（オンライン）</button>
-        <button id="start-offline-btn" class="btn accent">オフライン（1人プレイ）で遊ぶ</button>
-      </div>
-
       <div id="waiting-room" class="waiting-room hidden">
-        <h3>ルーム <span id="wait-room-code"></span> 待機中</h3>
-        <p class="small-note">同じ4桁IDを入力したメンバーがここに表示されます（最大8人）</p>
+        <h3>待機室</h3>
+        <div class="room-code-big" id="wait-room-code">0000</div>
+        <div style="margin: 8px 0 12px;">
+          <button id="copy-invite-btn" class="btn info small" type="button">🔗 招待URLをコピー</button>
+        </div>
+        <p class="small-note">招待URLか4桁IDを友達に共有してください（最大8人）</p>
         <ul id="waiting-players-list"></ul>
-        <button id="start-online-game-btn" class="btn primary hidden">このメンバーでゲーム開始！</button>
-        <p id="waiting-host-msg" class="small-note hidden">ホストがゲームを開始するのを待っています...</p>
+        <div class="lobby-actions">
+          <button id="start-online-game-btn" class="btn primary hidden">このメンバーでゲーム開始！</button>
+          <p id="waiting-host-msg" class="small-note hidden">ホストがゲームを開始するのを待っています...</p>
+          <button id="leave-wait-btn" class="btn secondary small" type="button">待機室を出る</button>
+        </div>
       </div>
     </div>
   </div>
@@ -215,7 +243,10 @@
         <div id="pill-river" class="stat-pill">川完成: <strong id="river-status">未</strong></div>
         <div class="stat-pill">完成池: <strong id="pond-count">0</strong></div>
       </div>
-      <button id="leave-btn" class="btn small secondary">退出</button>
+      <div class="top-actions">
+        <button id="game-invite-btn" class="btn small info hidden">招待URL</button>
+        <button id="leave-btn" class="btn small secondary">退出</button>
+      </div>
     </header>
 
     <div class="main-area">
@@ -277,22 +308,21 @@
   <script type="module">
     import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-app.js';
     import {
-      getFirestore, doc, onSnapshot, runTransaction, updateDoc
+      getFirestore, doc, getDoc, onSnapshot, runTransaction, updateDoc
     } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-firestore.js';
 
-    /* === 1. Firebase設定（オンラインで遊ぶ場合はここを書き換えてください） === */
+    /* === 1. Firebase設定 === */
     const firebaseConfig = {
-  apiKey: "AIzaSyD1YQwuJQDMUsS8lmr_EGBQam4dOst-XhQ",
-  authDomain: "enmotakenawa-fe9fe.firebaseapp.com",
-  projectId: "enmotakenawa-fe9fe",
-  storageBucket: "enmotakenawa-fe9fe.firebasestorage.app",
-  messagingSenderId: "807332534801",
-  appId: "1:807332534801:web:04c987d3d29ce801436fb0"
-};
+      apiKey: "AIzaSyD1YQwuJQDMUsS8lmr_EGBQam4dOst-XhQ",
+      authDomain: "enmotakenawa-fe9fe.firebaseapp.com",
+      projectId: "enmotakenawa-fe9fe",
+      storageBucket: "enmotakenawa-fe9fe.firebasestorage.app",
+      messagingSenderId: "807332534801",
+      appId: "1:807332534801:web:04c987d3d29ce801436fb0"
+    };
 
-    function isFirebaseConfigured() {
-      return firebaseConfig.apiKey && !firebaseConfig.apiKey.startsWith("YOUR_");
-    }
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
 
     /* === 2. ゲーム設定・カード定義 === */
     const GAME_CONFIG = {
@@ -438,13 +468,72 @@
       return deck;
     }
 
+    /* 初期マップの5パターン（すべて整合性検証済み） */
+    const INITIAL_ROAD_TEMPLATES = [
+      {
+        "0,-1": { type: "main_curve_wide", rot: 5 },
+        "-1,-1": { type: "main_straight", rot: 2 },
+        "1,-2": { type: "main_straight", rot: 1 }
+      },
+      {
+        "0,-1": { type: "main_rotary_3", rot: 0 },
+        "0,-2": { type: "main_curve_wide", rot: 1 },
+        "-1,0": { type: "main_straight", rot: 1 },
+        "1,-1": { type: "main_straight", rot: 2 }
+      },
+      {
+        "0,-1": { type: "main_curve_wide", rot: 0 },
+        "0,-2": { type: "main_curve_wide", rot: 3 },
+        "1,-1": { type: "main_curve_sharp", rot: 5 }
+      },
+      {
+        "0,-1": { type: "main_t_junction", rot: 1 },
+        "1,-2": { type: "main_straight", rot: 1 },
+        "-1,0": { type: "main_curve_wide", rot: 1 }
+      },
+      {
+        "0,-1": { type: "main_curve_sharp", rot: 1 },
+        "1,-2": { type: "main_straight", rot: 1 },
+        "1,-1": { type: "main_curve_wide", rot: 5 }
+      }
+    ];
+
+    function rotateAxial(q, r, steps) {
+      let nq = q, nr = r;
+      for (let i = 0; i < steps; i++) {
+        const nextQ = -nr;
+        const nextR = nq + nr;
+        nq = nextQ;
+        nr = nextR;
+      }
+      return { q: nq, r: nr };
+    }
+
+    /* ランダムなパターン・全体回転・滝の向きで初期マップを生成 */
     function createInitialBoard() {
-      return {
-        "0,0": { type: "waterfall", rot: 3, placedBy: "初期配置" },
-        "0,-1": { type: "main_curve_wide", rot: 5, placedBy: "初期配置" },
-        "-1,-1": { type: "main_straight", rot: 2, placedBy: "初期配置" },
-        "1,-2": { type: "main_straight", rot: 1, placedBy: "初期配置" }
-      };
+      const tpl = INITIAL_ROAD_TEMPLATES[Math.floor(Math.random() * INITIAL_ROAD_TEMPLATES.length)];
+      const globalRot = Math.floor(Math.random() * 6);
+      const board = {};
+
+      for (const [key, tile] of Object.entries(tpl)) {
+        const [q, r] = key.split(',').map(Number);
+        const pos = rotateAxial(q, r, globalRot);
+        board[`${pos.q},${pos.r}`] = {
+          type: tile.type,
+          rot: (tile.rot + globalRot) % 6,
+          placedBy: "初期配置"
+        };
+      }
+
+      /* 滝(0,0)は隣接タイルが存在しない空き辺の中からランダムに向きを決定 */
+      const openDirs = [];
+      for (let d = 0; d < 6; d++) {
+        const nk = `${DIRS[d][0]},${DIRS[d][1]}`;
+        if (!board[nk]) openDirs.push(d);
+      }
+      const waterfallRot = openDirs[Math.floor(Math.random() * openDirs.length)];
+      board["0,0"] = { type: "waterfall", rot: waterfallRot, placedBy: "初期配置" };
+      return board;
     }
 
     /* === 3. 六角形ロジック・ループ判定・川完成判定 === */
@@ -486,11 +575,8 @@
       return (CARD_DEFS[type].riverEdges || []).map(i => (i + rot) % 6);
     }
 
-    function canEdgesConnect(edgeA, edgeB) {
-      return edgeA === edgeB;
-    }
+    function canEdgesConnect(edgeA, edgeB) { return edgeA === edgeB; }
 
-    /* 厳密一致 ＋ 少なくとも1辺で道・川・池のいずれかが繋がっている場合のみ配置可 */
     function canPlaceCard(board, q, r, type, rot) {
       const key = hexKey(q, r);
       const existing = board[key];
@@ -519,9 +605,7 @@
     function getCandidateCoords(board, type) {
       const candidates = new Set();
       for (const [key, tile] of Object.entries(board)) {
-        if (type === 'bridge' && tile.type === 'main_straight') {
-          candidates.add(key);
-        }
+        if (type === 'bridge' && tile.type === 'main_straight') candidates.add(key);
         const { q, r } = parseKey(key);
         for (const [dq, dr] of DIRS) {
           const nk = hexKey(q + dq, r + dr);
@@ -570,12 +654,8 @@
         changed = false;
         for (const [k, list] of adj.entries()) {
           const filtered = list.filter(nb => adj.has(nb));
-          if (filtered.length < 2) {
-            adj.delete(k);
-            changed = true;
-          } else if (filtered.length !== list.length) {
-            adj.set(k, filtered);
-          }
+          if (filtered.length < 2) { adj.delete(k); changed = true; }
+          else if (filtered.length !== list.length) adj.set(k, filtered);
         }
       }
       const nodes = Array.from(adj.keys()).sort();
@@ -587,17 +667,12 @@
         const path = [start];
         let steps = 0;
         const dfs = (curr) => {
-          if (bigLoop) return;
-          if (++steps > 4000) return;
+          if (bigLoop || ++steps > 4000) return;
           const nbs = adj.get(curr) || [];
           for (const next of nbs) {
             if (next === start && path.length >= GAME_CONFIG.SMALL_LOOP_MIN_TILES) {
-              if (path.length >= GAME_CONFIG.BIG_LOOP_MIN_TILES) {
-                bigLoop = [...path];
-                return;
-              } else {
-                smallLoopSignatures.add([...path].sort().join('|'));
-              }
+              if (path.length >= GAME_CONFIG.BIG_LOOP_MIN_TILES) { bigLoop = [...path]; return; }
+              else smallLoopSignatures.add([...path].sort().join('|'));
             } else if (!visited.has(next) && next > start) {
               visited.add(next);
               path.push(next);
@@ -650,28 +725,21 @@
     function detectRiverCompleted(board, completedPondKeys) {
       const waterfallKey = Object.keys(board).find(k => CARD_DEFS[board[k].type].isWaterfall);
       if (!waterfallKey) return false;
-
       const visited = new Set([waterfallKey]);
       const queue = [waterfallKey];
       let hasOpenEnd = false;
       let reachedCompletedPond = false;
-
       while (queue.length > 0) {
         const curr = queue.shift();
         const tile = board[curr];
         const { q, r } = parseKey(curr);
         if (completedPondKeys.has(curr)) reachedCompletedPond = true;
-
         const rEdges = getRotatedRiverEdges(tile.type, tile.rot);
         for (const d of rEdges) {
           const nk = hexKey(q + DIRS[d][0], r + DIRS[d][1]);
           const nb = board[nk];
-          if (!nb) {
-            hasOpenEnd = true;
-          } else if (!visited.has(nk)) {
-            visited.add(nk);
-            queue.push(nk);
-          }
+          if (!nb) hasOpenEnd = true;
+          else if (!visited.has(nk)) { visited.add(nk); queue.push(nk); }
         }
       }
       return reachedCompletedPond && !hasOpenEnd;
@@ -776,20 +844,19 @@
       return `<svg viewBox="-50 -46 100 92" width="100%" height="100%">${renderCardInnerSVG(type, rot)}</svg>`;
     }
 
-    /* === 5. ゲーム進行・通信制御 === */
-    let db = null;
-    if (isFirebaseConfigured()) {
-      const app = initializeApp(firebaseConfig);
-      db = getFirestore(app);
-    } else {
-      document.getElementById('firebase-warning').classList.remove('hidden');
-    }
+    /* === 5. ゲーム進行・通信制御・自動復帰 === */
+    const STORAGE_KEYS = {
+      PID: 'enmo_pid_v1',
+      NAME: 'enmo_name_v1',
+      ACTIVE_ROOM: 'enmo_active_room_v1',
+      OFFLINE_STATE: 'enmo_offline_state_v1'
+    };
 
     const local = {
       mode: 'online',
       roomId: null,
-      playerId: sessionStorage.getItem('enmo_pid') || ('p_' + Math.random().toString(36).slice(2, 10)),
-      nickname: '',
+      playerId: localStorage.getItem(STORAGE_KEYS.PID) || ('p_' + Math.random().toString(36).slice(2, 10)),
+      nickname: localStorage.getItem(STORAGE_KEYS.NAME) || '',
       gameState: null,
       unsub: null,
       selectedHandIdx: null,
@@ -799,17 +866,176 @@
       isDragging: false, dragMoved: false, lastMouse: { x: 0, y: 0 },
       resultShown: false
     };
-    sessionStorage.setItem('enmo_pid', local.playerId);
-    const $ = id => document.getElementById(id);
+    localStorage.setItem(STORAGE_KEYS.PID, local.playerId);
 
-    $('random-room-btn').onclick = () => {
-      $('room-id-input').value = String(Math.floor(1000 + Math.random() * 9000));
+    const $ = id => document.getElementById(id);
+    if (local.nickname) $('nickname-input').value = local.nickname;
+
+    function clearSavedSession() {
+      localStorage.removeItem(STORAGE_KEYS.ACTIVE_ROOM);
+      localStorage.removeItem(STORAGE_KEYS.OFFLINE_STATE);
+      if (location.search) history.replaceState(null, '', location.pathname);
+    }
+
+    function getInviteUrl(roomId) {
+      return `${location.origin}${location.pathname}?room=${roomId}`;
+    }
+
+    async function copyInviteUrl(roomId, btnEl) {
+      const url = getInviteUrl(roomId);
+      try {
+        await navigator.clipboard.writeText(url);
+        const orig = btnEl.textContent;
+        btnEl.textContent = 'コピーしました！✅';
+        setTimeout(() => { btnEl.textContent = orig; }, 2000);
+      } catch {
+        prompt('下の招待URLをコピーして共有してください：', url);
+      }
+    }
+
+    /* オンライン部屋への購読・画面反映 */
+    function subscribeRoom(roomId) {
+      local.mode = 'online';
+      local.roomId = roomId;
+      localStorage.setItem(STORAGE_KEYS.ACTIVE_ROOM, roomId);
+      const roomRef = doc(db, 'rooms', roomId);
+      if (local.unsub) local.unsub();
+      local.unsub = onSnapshot(roomRef, (snap) => {
+        if (!snap.exists()) {
+          alert('このルームは見つかりませんでした。');
+          clearSavedSession();
+          location.reload();
+          return;
+        }
+        local.gameState = snap.data();
+        if (local.gameState.status === 'lobby') {
+          $('game-screen').classList.add('hidden');
+          $('lobby-screen').classList.remove('hidden');
+          renderWaitingRoom();
+        } else {
+          if ($('game-screen').classList.contains('hidden')) enterGameScreen();
+          renderAll();
+        }
+      });
+    }
+
+    /* 起動時のURL招待チェック ＆ 自動復帰 */
+    async function initOnLoad() {
+      const params = new URLSearchParams(location.search);
+      const urlRoom = params.get('room');
+      const savedRoom = localStorage.getItem(STORAGE_KEYS.ACTIVE_ROOM);
+      const savedOffline = localStorage.getItem(STORAGE_KEYS.OFFLINE_STATE);
+
+      /* オフライン復帰（URL招待がない場合） */
+      if (savedOffline && !urlRoom && !savedRoom) {
+        try {
+          local.mode = 'offline';
+          local.gameState = JSON.parse(savedOffline);
+          enterGameScreen();
+          renderAll();
+          return;
+        } catch {
+          localStorage.removeItem(STORAGE_KEYS.OFFLINE_STATE);
+        }
+      }
+
+      /* オンライン自動復帰 */
+      if (savedRoom && (!urlRoom || urlRoom === savedRoom)) {
+        try {
+          const snap = await getDoc(doc(db, 'rooms', savedRoom));
+          if (snap.exists()) {
+            const data = snap.data();
+            const joined = (data.players || []).some(p => p.id === local.playerId);
+            if (joined) {
+              subscribeRoom(savedRoom);
+              return;
+            }
+          }
+        } catch {}
+        localStorage.removeItem(STORAGE_KEYS.ACTIVE_ROOM);
+      }
+
+      /* 招待URLから来た場合 */
+      if (urlRoom && /^\d{4}$/.test(urlRoom)) {
+        $('room-id-input').value = urlRoom;
+        $('invite-banner').textContent = `📩 ルーム「${urlRoom}」への招待です！ニックネームを入れて参加してください。`;
+        $('invite-banner').classList.remove('hidden');
+      }
+    }
+
+    /* 新しく部屋を作る（4桁ID自動発行） */
+    $('create-room-btn').onclick = async () => {
+      const name = $('nickname-input').value.trim();
+      if (!name) return alert('ニックネームを入力してください。');
+      local.nickname = name;
+      localStorage.setItem(STORAGE_KEYS.NAME, name);
+
+      $('create-room-btn').disabled = true;
+      try {
+        let createdId = null;
+        for (let attempt = 0; attempt < 10; attempt++) {
+          const candidateId = String(Math.floor(1000 + Math.random() * 9000));
+          const roomRef = doc(db, 'rooms', candidateId);
+          const ok = await runTransaction(db, async (tx) => {
+            const snap = await tx.get(roomRef);
+            if (snap.exists()) return false;
+            tx.set(roomRef, {
+              status: 'lobby', hostId: local.playerId,
+              players: [{ id: local.playerId, name, hand: [] }],
+              turnIndex: 0, phase: 'draw', turnCount: 1, deck: [],
+              board: createInitialBoard(), smallLoopCount: 0, completedPonds: 0,
+              bigLoopDone: false, riverDone: false, winLoopTiles: [],
+              logs: [`${name} がルーム ${candidateId} を作成しました。`]
+            });
+            return true;
+          });
+          if (ok) { createdId = candidateId; break; }
+        }
+        if (!createdId) throw new Error('空きルームIDの発行に失敗しました。もう一度お試しください。');
+        subscribeRoom(createdId);
+      } catch (err) {
+        alert(err.message);
+      } finally {
+        $('create-room-btn').disabled = false;
+      }
     };
 
+    /* 4桁IDで既存の部屋に参加 */
+    $('join-room-btn').onclick = async () => {
+      const name = $('nickname-input').value.trim();
+      const roomId = $('room-id-input').value.trim();
+      if (!name) return alert('ニックネームを入力してください。');
+      if (!/^\d{4}$/.test(roomId)) return alert('4桁の数字でルームIDを入力してください。');
+      local.nickname = name;
+      localStorage.setItem(STORAGE_KEYS.NAME, name);
+
+      const roomRef = doc(db, 'rooms', roomId);
+      try {
+        await runTransaction(db, async (tx) => {
+          const snap = await tx.get(roomRef);
+          if (!snap.exists()) throw new Error(`ルーム「${roomId}」が見つかりません。IDをご確認ください。`);
+          const data = snap.data();
+          const exists = data.players.some(p => p.id === local.playerId);
+          if (!exists) {
+            if (data.status !== 'lobby') throw new Error('このルームはすでにゲーム進行中です。');
+            if (data.players.length >= GAME_CONFIG.MAX_PLAYERS) throw new Error('満員（最大8人）です。');
+            data.players.push({ id: local.playerId, name, hand: [] });
+            data.logs = [...(data.logs || []), `${name} が参加しました。`].slice(-30);
+            tx.update(roomRef, { players: data.players, logs: data.logs });
+          }
+        });
+        subscribeRoom(roomId);
+      } catch (err) {
+        alert(err.message);
+      }
+    };
+
+    /* オフライン1人プレイ */
     $('start-offline-btn').onclick = () => {
       const name = $('nickname-input').value.trim() || 'プレイヤー1';
       local.mode = 'offline';
       local.nickname = name;
+      localStorage.setItem(STORAGE_KEYS.NAME, name);
       const deck = createShuffledDeck();
       const hand = deck.splice(0, GAME_CONFIG.INITIAL_HAND_SIZE);
       local.gameState = {
@@ -820,57 +1046,13 @@
         bigLoopDone: false, riverDone: false, winLoopTiles: [],
         logs: ['オフライン（1人プレイ）を開始しました！']
       };
+      localStorage.setItem(STORAGE_KEYS.OFFLINE_STATE, JSON.stringify(local.gameState));
       enterGameScreen();
       renderAll();
     };
 
-    $('join-online-btn').onclick = async () => {
-      if (!db) return alert('firebaseConfig を設定してからオンライン参加してください。');
-      const name = $('nickname-input').value.trim();
-      const roomId = $('room-id-input').value.trim();
-      if (!name) return alert('ニックネームを入力してください。');
-      if (!/^\d{4}$/.test(roomId)) return alert('4桁の数字でルームIDを入力してください。');
-
-      local.mode = 'online';
-      local.nickname = name;
-      local.roomId = roomId;
-      const roomRef = doc(db, 'rooms', roomId);
-      try {
-        await runTransaction(db, async (tx) => {
-          const snap = await tx.get(roomRef);
-          if (!snap.exists()) {
-            tx.set(roomRef, {
-              status: 'lobby', hostId: local.playerId,
-              players: [{ id: local.playerId, name, hand: [] }],
-              turnIndex: 0, phase: 'draw', turnCount: 1, deck: [],
-              board: createInitialBoard(), smallLoopCount: 0, completedPonds: 0,
-              bigLoopDone: false, riverDone: false, winLoopTiles: [],
-              logs: [`${name} がルーム ${roomId} を作成しました。`]
-            });
-          } else {
-            const data = snap.data();
-            const exists = data.players.some(p => p.id === local.playerId);
-            if (!exists) {
-              if (data.status !== 'lobby') throw new Error('このルームはすでにゲーム進行中です。');
-              if (data.players.length >= GAME_CONFIG.MAX_PLAYERS) throw new Error('満員（最大8人）です。');
-              data.players.push({ id: local.playerId, name, hand: [] });
-              data.logs = [...(data.logs || []), `${name} が参加しました。`].slice(-30);
-              tx.update(roomRef, { players: data.players, logs: data.logs });
-            }
-          }
-        });
-        if (local.unsub) local.unsub();
-        local.unsub = onSnapshot(roomRef, (snap) => {
-          if (!snap.exists()) return;
-          local.gameState = snap.data();
-          if (local.gameState.status === 'lobby') renderWaitingRoom();
-          else {
-            if ($('game-screen').classList.contains('hidden')) enterGameScreen();
-            renderAll();
-          }
-        });
-      } catch (err) { alert(err.message); }
-    };
+    $('copy-invite-btn').onclick = () => copyInviteUrl(local.roomId, $('copy-invite-btn'));
+    $('game-invite-btn').onclick = () => copyInviteUrl(local.roomId, $('game-invite-btn'));
 
     $('start-online-game-btn').onclick = async () => {
       const state = local.gameState;
@@ -886,10 +1068,12 @@
 
     function renderWaitingRoom() {
       const s = local.gameState;
+      $('lobby-entry').classList.add('hidden');
+      $('invite-banner').classList.add('hidden');
       $('waiting-room').classList.remove('hidden');
       $('wait-room-code').textContent = local.roomId;
       $('waiting-players-list').innerHTML = s.players
-        .map((p, i) => `<li>${i === 0 ? '👑 ' : ''}${escapeHtml(p.name)}</li>`).join('');
+        .map((p, i) => `<li>${i === 0 ? '👑 ' : ''}${escapeHtml(p.name)}${p.id === local.playerId ? ' (あなた)' : ''}</li>`).join('');
       const isHost = s.hostId === local.playerId;
       $('start-online-game-btn').classList.toggle('hidden', !isHost);
       $('waiting-host-msg').classList.toggle('hidden', isHost);
@@ -897,14 +1081,19 @@
 
     async function saveState(patch) {
       Object.assign(local.gameState, patch);
-      if (local.mode === 'online') await updateDoc(doc(db, 'rooms', local.roomId), patch);
-      else renderAll();
+      if (local.mode === 'online') {
+        await updateDoc(doc(db, 'rooms', local.roomId), patch);
+      } else {
+        localStorage.setItem(STORAGE_KEYS.OFFLINE_STATE, JSON.stringify(local.gameState));
+        renderAll();
+      }
     }
 
     function enterGameScreen() {
       $('lobby-screen').classList.add('hidden');
       $('game-screen').classList.remove('hidden');
       $('room-badge').textContent = local.mode === 'online' ? `ルーム: ${local.roomId}` : 'オフライン';
+      $('game-invite-btn').classList.toggle('hidden', local.mode !== 'online');
       resetView();
     }
 
@@ -1202,11 +1391,20 @@
     $('reset-view-btn').onclick = resetView;
     window.addEventListener('resize', updateViewportTransform);
     $('close-result-btn').onclick = () => $('result-modal').classList.add('hidden');
-    $('leave-btn').onclick = $('back-lobby-btn').onclick = () => location.reload();
+
+    function leaveAndReload() {
+      clearSavedSession();
+      location.href = location.pathname;
+    }
+    $('leave-wait-btn').onclick = leaveAndReload;
+    $('leave-btn').onclick = leaveAndReload;
+    $('back-lobby-btn').onclick = leaveAndReload;
 
     function escapeHtml(str) {
       return String(str).replace(/[&<>"']/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
     }
+
+    initOnLoad();
   </script>
 </body>
 </html>
