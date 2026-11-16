@@ -1,1 +1,512 @@
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-app.js';
+import {
+  getFirestore, doc, onSnapshot, runTransaction, updateDoc
+} from 'https://www.gstatic.com/firebasejs/13.3.0/firebase-firestore.js';
 
+import { firebaseConfig, isFirebaseConfigured } from './firebase-config.js';
+import {
+  CARD_DEFS, GAME_CONFIG, createInitialBoard, createShuffledDeck
+} from './cards.js';
+import {
+  hexToPixel, hexKey, getValidPlacements, hasAnyPlayableCard,
+  detectMainRoadLoops, detectCompletedPonds
+} from './hex.js';
+import { renderCardInnerSVG, createCardPreviewSVG, HEX_POINTS } from './renderer.js';
+
+// Firebase 初期化
+let db = null;
+if (isFirebaseConfigured()) {
+  const app = initializeApp(firebaseConfig);
+  db = getFirestore(app);
+} else {
+  document.getElementById('firebase-warning').classList.remove('hidden');
+}
+
+// ローカル状態
+const local = {
+  mode: 'online', // 'online' | 'offline'
+  roomId: null,
+  playerId: sessionStorage.getItem('enmo_pid') || ('p_' + Math.random().toString(36).slice(2, 10)),
+  nickname: '',
+  gameState: null,
+  unsub: null,
+  selectedHandIdx: null,
+  currentRot: 0,
+  pendingSlot: null, // { q, r }
+  panX: 0,
+  panY: 0,
+  zoom: 1.15,
+  isDragging: false,
+  dragMoved: false,
+  lastMouse: { x: 0, y: 0 },
+  resultShown: false
+};
+sessionStorage.setItem('enmo_pid', local.playerId);
+
+// DOM参照
+const $ = id => document.getElementById(id);
+
+// --- ロビー操作 ---
+$('random-room-btn').onclick = () => {
+  $('room-id-input').value = String(Math.floor(1000 + Math.random() * 9000));
+};
+
+$('start-offline-btn').onclick = () => {
+  const name = $('nickname-input').value.trim() || 'プレイヤー1';
+  local.mode = 'offline';
+  local.nickname = name;
+  const deck = createShuffledDeck();
+  const hand = deck.splice(0, GAME_CONFIG.INITIAL_HAND_SIZE);
+  local.gameState = {
+    status: 'playing',
+    hostId: local.playerId,
+    players: [{ id: local.playerId, name, hand }],
+    turnIndex: 0,
+    phase: 'draw',
+    turnCount: 1,
+    deck,
+    board: createInitialBoard(),
+    smallLoopCount: 0,
+    completedPonds: 0,
+    winLoopTiles: [],
+    logs: ['オフライン（1人プレイ）を開始しました！']
+  };
+  enterGameScreen();
+  renderAll();
+};
+
+$('join-online-btn').onclick = async () => {
+  if (!db) return alert('firebase-config.js を設定してからオンライン参加してください。');
+  const name = $('nickname-input').value.trim();
+  const roomId = $('room-id-input').value.trim();
+  if (!name) return alert('ニックネームを入力してください。');
+  if (!/^\d{4}$/.test(roomId)) return alert('4桁の数字でルームIDを入力してください。');
+
+  local.mode = 'online';
+  local.nickname = name;
+  local.roomId = roomId;
+
+  const roomRef = doc(db, 'rooms', roomId);
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(roomRef);
+      if (!snap.exists()) {
+        tx.set(roomRef, {
+          status: 'lobby',
+          hostId: local.playerId,
+          players: [{ id: local.playerId, name, hand: [] }],
+          turnIndex: 0,
+          phase: 'draw',
+          turnCount: 1,
+          deck: [],
+          board: createInitialBoard(),
+          smallLoopCount: 0,
+          completedPonds: 0,
+          winLoopTiles: [],
+          logs: [`${name} がルーム ${roomId} を作成しました。`]
+        });
+      } else {
+        const data = snap.data();
+        const exists = data.players.some(p => p.id === local.playerId);
+        if (!exists) {
+          if (data.status !== 'lobby') throw new Error('このルームはすでにゲーム進行中です。');
+          if (data.players.length >= GAME_CONFIG.MAX_PLAYERS) throw new Error('満員（最大8人）です。');
+          data.players.push({ id: local.playerId, name, hand: [] });
+          data.logs = [...(data.logs || []), `${name} が参加しました。`].slice(-30);
+          tx.update(roomRef, { players: data.players, logs: data.logs });
+        }
+      }
+    });
+
+    if (local.unsub) local.unsub();
+    local.unsub = onSnapshot(roomRef, (snap) => {
+      if (!snap.exists()) return;
+      local.gameState = snap.data();
+      if (local.gameState.status === 'lobby') {
+        renderWaitingRoom();
+      } else {
+        if ($('game-screen').classList.contains('hidden')) enterGameScreen();
+        renderAll();
+      }
+    });
+  } catch (err) {
+    alert(err.message);
+  }
+};
+
+$('start-online-game-btn').onclick = async () => {
+  const state = local.gameState;
+  const deck = createShuffledDeck();
+  const players = state.players.map(p => ({
+    ...p,
+    hand: deck.splice(0, GAME_CONFIG.INITIAL_HAND_SIZE)
+  }));
+  await saveState({
+    status: 'playing',
+    players,
+    deck,
+    board: createInitialBoard(),
+    turnIndex: 0,
+    phase: 'draw',
+    turnCount: 1,
+    smallLoopCount: 0,
+    completedPonds: 0,
+    winLoopTiles: [],
+    logs: [...(state.logs || []), 'ゲーム開始！まずは山札から1枚引きましょう。'].slice(-30)
+  });
+};
+
+function renderWaitingRoom() {
+  const s = local.gameState;
+  $('waiting-room').classList.remove('hidden');
+  $('wait-room-code').textContent = local.roomId;
+  $('waiting-players-list').innerHTML = s.players
+    .map((p, i) => `<li>${i === 0 ? '👑 ' : ''}${escapeHtml(p.name)}</li>`)
+    .join('');
+  const isHost = s.hostId === local.playerId;
+  $('start-online-game-btn').classList.toggle('hidden', !isHost);
+  $('waiting-host-msg').classList.toggle('hidden', isHost);
+}
+
+// --- 状態更新ヘルパー ---
+async function saveState(patch) {
+  Object.assign(local.gameState, patch);
+  if (local.mode === 'online') {
+    await updateDoc(doc(db, 'rooms', local.roomId), patch);
+  } else {
+    renderAll();
+  }
+}
+
+function enterGameScreen() {
+  $('lobby-screen').classList.add('hidden');
+  $('game-screen').classList.remove('hidden');
+  $('room-badge').textContent = local.mode === 'online' ? `ルーム: ${local.roomId}` : 'オフライン';
+  resetView();
+}
+
+// --- ターン進行ロジック ---
+function isMyTurn() {
+  const s = local.gameState;
+  if (!s || s.status !== 'playing') return false;
+  return s.players[s.turnIndex]?.id === local.playerId;
+}
+
+$('draw-btn').onclick = async () => {
+  if (!isMyTurn()) return;
+  const s = local.gameState;
+  if (s.phase !== 'draw') return;
+
+  const deck = [...s.deck];
+  const players = structuredClone(s.players);
+  const me = players[s.turnIndex];
+  const logs = [...(s.logs || [])];
+
+  if (deck.length > 0) {
+    const drawn = deck.pop();
+    me.hand.push(drawn);
+    logs.push(`${me.name} がカードを1枚引きました。`);
+  }
+
+  await saveState({
+    deck,
+    players,
+    phase: 'place',
+    logs: logs.slice(-30)
+  });
+};
+
+$('rotate-btn').onclick = () => rotateSelected();
+window.addEventListener('keydown', (e) => {
+  if ((e.key === 'r' || e.key === 'R') && !$('game-screen').classList.contains('hidden')) {
+    rotateSelected();
+  }
+});
+
+function rotateSelected() {
+  if (local.selectedHandIdx === null) return;
+  local.currentRot = (local.currentRot + 1) % 6;
+  local.pendingSlot = null;
+  $('confirm-bar').classList.add('hidden');
+  renderAll();
+}
+
+$('confirm-place-btn').onclick = async () => {
+  if (!isMyTurn() || !local.pendingSlot || local.selectedHandIdx === null) return;
+  const s = local.gameState;
+  const players = structuredClone(s.players);
+  const me = players[s.turnIndex];
+  const cardType = me.hand.splice(local.selectedHandIdx, 1)[0];
+
+  const board = { ...s.board };
+  const { q, r } = local.pendingSlot;
+  board[hexKey(q, r)] = { type: cardType, rot: local.currentRot, placedBy: me.name };
+
+  local.selectedHandIdx = null;
+  local.currentRot = 0;
+  local.pendingSlot = null;
+  $('confirm-bar').classList.add('hidden');
+
+  const loops = detectMainRoadLoops(board);
+  const completedPonds = detectCompletedPonds(board);
+  const logs = [...(s.logs || []), `${me.name} が「${CARD_DEFS[cardType].name}」を配置しました。`];
+  if (loops.smallLoopCount > s.smallLoopCount) logs.push('✨ 小さなループが完成しました！');
+  if (completedPonds > s.completedPonds) logs.push('💧 新しい池が完成しました！');
+
+  // 勝利判定
+  if (loops.bigLoop) {
+    logs.push(`🎉 ${GAME_CONFIG.BIG_LOOP_MIN_TILES}枚以上の大きな輪が完成！全員の勝利！`);
+    await saveState({
+      board, players, status: 'won', winLoopTiles: loops.bigLoop,
+      smallLoopCount: loops.smallLoopCount, completedPonds, logs: logs.slice(-30)
+    });
+    return;
+  }
+
+  await advanceTurnOrCheckLoss(board, players, s.deck, loops.smallLoopCount, completedPonds, logs);
+};
+
+$('cancel-place-btn').onclick = () => {
+  local.pendingSlot = null;
+  $('confirm-bar').classList.add('hidden');
+  renderBoard();
+};
+
+$('skip-btn').onclick = async () => {
+  if (!isMyTurn()) return;
+  const s = local.gameState;
+  const me = s.players[s.turnIndex];
+  const logs = [...(s.logs || []), `${me.name} は出せる場所がなくスキップしました。`];
+  await advanceTurnOrCheckLoss(s.board, s.players, s.deck, s.smallLoopCount, s.completedPonds, logs);
+};
+
+async function advanceTurnOrCheckLoss(board, players, deck, smallLoopCount, completedPonds, logs) {
+  const s = local.gameState;
+  // 山札が0枚で、全プレイヤーの誰の手札も配置できないならゲームオーバー
+  if (deck.length === 0) {
+    const anyoneCanPlay = players.some(p => hasAnyPlayableCard(board, p.hand));
+    if (!anyoneCanPlay) {
+      logs.push('💔 山札が尽き、誰も出せるカードがなくなりました…ゲームオーバー。');
+      await saveState({
+        board, players, status: 'lost', smallLoopCount, completedPonds, logs: logs.slice(-30)
+      });
+      return;
+    }
+  }
+
+  const nextIdx = (s.turnIndex + 1) % players.length;
+  // 山札が0枚ならドローをスキップして直接配置フェーズへ
+  const nextPhase = deck.length > 0 ? 'draw' : 'place';
+  await saveState({
+    board,
+    players,
+    turnIndex: nextIdx,
+    phase: nextPhase,
+    turnCount: s.turnCount + 1,
+    smallLoopCount,
+    completedPonds,
+    logs: logs.slice(-30)
+  });
+}
+
+// --- 描画 ---
+function renderAll() {
+  const s = local.gameState;
+  if (!s) return;
+
+  const currentP = s.players[s.turnIndex];
+  $('turn-count').textContent = s.turnCount;
+  $('current-player-name').textContent = currentP ? currentP.name : '-';
+  $('deck-count').textContent = s.deck.length;
+  $('small-loop-count').textContent = s.smallLoopCount || 0;
+  $('pond-count').textContent = s.completedPonds || 0;
+  $('player-count').textContent = s.players.length;
+
+  $('players-list').innerHTML = s.players.map((p, idx) => `
+    <li class="${idx === s.turnIndex ? 'active-turn' : ''}">
+      <span>${idx === s.turnIndex ? '▶ ' : ''}${escapeHtml(p.name)}${p.id === local.playerId ? ' (あなた)' : ''}</span>
+      <span>手札${p.hand.length}枚</span>
+    </li>
+  `).join('');
+
+  const logBox = $('action-log');
+  logBox.innerHTML = (s.logs || []).map(l => `<div>• ${escapeHtml(l)}</div>`).join('');
+  logBox.scrollTop = logBox.scrollHeight;
+
+  renderTurnControls();
+  renderHand();
+  renderBoard();
+
+  if ((s.status === 'won' || s.status === 'lost') && !local.resultShown) {
+    local.resultShown = true;
+    $('result-title').textContent = s.status === 'won' ? '🎉 街づくり大成功！（勝利）' : '💔 ゲームオーバー';
+    $('result-desc').textContent = s.status === 'won'
+      ? `${s.winLoopTiles.length}枚の道で大きな輪を完成させました！`
+      : '山札がなくなり、誰も配置できるカードがなくなりました。';
+    $('result-modal').classList.remove('hidden');
+  }
+}
+
+function renderTurnControls() {
+  const s = local.gameState;
+  const myTurn = isMyTurn();
+  const me = s.players.find(p => p.id === local.playerId);
+
+  $('draw-btn').classList.add('hidden');
+  $('skip-btn').classList.add('hidden');
+  $('rotate-btn').disabled = true;
+
+  if (s.status !== 'playing') {
+    $('turn-instruction').textContent = s.status === 'won' ? '勝利！大きな輪が完成しました！' : 'ゲーム終了';
+    return;
+  }
+
+  if (!myTurn) {
+    $('turn-instruction').textContent = `${s.players[s.turnIndex].name} さんの手番です...`;
+    return;
+  }
+
+  if (s.phase === 'draw') {
+    $('turn-instruction').textContent = 'あなたの番です！まず山札から1枚引いてください。';
+    $('draw-btn').classList.remove('hidden');
+  } else {
+    const canPlay = me ? hasAnyPlayableCard(s.board, me.hand) : false;
+    $('rotate-btn').disabled = local.selectedHandIdx === null;
+    if (canPlay) {
+      $('turn-instruction').textContent = '手札からカードを選び、回転させて緑の枠に配置してください。';
+    } else {
+      $('turn-instruction').textContent = '手札のどのカードも置ける場所がありません。';
+      $('skip-btn').classList.remove('hidden');
+    }
+  }
+}
+
+function renderHand() {
+  const s = local.gameState;
+  const me = s.players.find(p => p.id === local.playerId);
+  const container = $('hand-container');
+  if (!me) { container.innerHTML = ''; return; }
+
+  const canSelect = isMyTurn() && s.phase === 'place';
+  container.innerHTML = me.hand.map((type, idx) => {
+    const isSel = idx === local.selectedHandIdx;
+    const rot = isSel ? local.currentRot : 0;
+    return `
+      <div class="hand-card ${isSel ? 'selected' : ''}" data-idx="${idx}">
+        <div class="card-svg-wrap">${createCardPreviewSVG(type, rot)}</div>
+        <div class="card-name">${CARD_DEFS[type].name}</div>
+      </div>
+    `;
+  }).join('');
+
+  container.querySelectorAll('.hand-card').forEach(el => {
+    el.onclick = () => {
+      if (!canSelect) return;
+      const idx = Number(el.dataset.idx);
+      if (local.selectedHandIdx === idx) {
+        rotateSelected();
+      } else {
+        local.selectedHandIdx = idx;
+        local.currentRot = 0;
+        local.pendingSlot = null;
+        $('confirm-bar').classList.add('hidden');
+        renderAll();
+      }
+    };
+  });
+}
+
+function renderBoard() {
+  const s = local.gameState;
+  const vp = $('board-viewport');
+  const winSet = new Set(s.winLoopTiles || []);
+  let html = '';
+
+  // 配置済みカード
+  for (const [key, tile] of Object.entries(s.board)) {
+    const [q, r] = key.split(',').map(Number);
+    const { x, y } = hexToPixel(q, r);
+    const cls = winSet.has(key) ? 'win-highlight' : '';
+    html += `<g class="${cls}" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">${renderCardInnerSVG(tile.type, tile.rot)}</g>`;
+  }
+
+  // 配置可能スポット
+  if (isMyTurn() && s.phase === 'place' && local.selectedHandIdx !== null) {
+    const me = s.players[s.turnIndex];
+    const selType = me.hand[local.selectedHandIdx];
+    if (selType) {
+      const slots = getValidPlacements(s.board, selType, local.currentRot);
+      for (const { q, r } of slots) {
+        const { x, y } = hexToPixel(q, r);
+        const isPending = local.pendingSlot && local.pendingSlot.q === q && local.pendingSlot.r === r;
+        if (isPending) {
+          html += `<g opacity="0.85" transform="translate(${x.toFixed(1)},${y.toFixed(1)})">${renderCardInnerSVG(selType, local.currentRot)}<polygon points="${HEX_POINTS}" fill="none" stroke="#15803d" stroke-width="3" /></g>`;
+        } else {
+          html += `<polygon class="valid-slot" data-q="${q}" data-r="${r}" points="${HEX_POINTS}" transform="translate(${x.toFixed(1)},${y.toFixed(1)})" />`;
+        }
+      }
+    }
+  }
+
+  vp.innerHTML = html;
+  updateViewportTransform();
+
+  vp.querySelectorAll('.valid-slot').forEach(el => {
+    el.onclick = () => {
+      if (local.dragMoved) return;
+      local.pendingSlot = { q: Number(el.dataset.q), r: Number(el.dataset.r) };
+      $('confirm-bar').classList.remove('hidden');
+      renderBoard();
+    };
+  });
+}
+
+// --- パン・ズーム操作 ---
+const boardContainer = $('board-container');
+function updateViewportTransform() {
+  const rect = boardContainer.getBoundingClientRect();
+  const cx = rect.width / 2 + local.panX;
+  const cy = rect.height / 2 + local.panY;
+  $('board-viewport').setAttribute('transform', `translate(${cx.toFixed(1)},${cy.toFixed(1)}) scale(${local.zoom})`);
+}
+function resetView() {
+  local.panX = 0; local.panY = 40; local.zoom = 1.15;
+  updateViewportTransform();
+}
+
+boardContainer.addEventListener('pointerdown', (e) => {
+  if (e.target.closest('.map-controls') || e.target.closest('.confirm-bar')) return;
+  local.isDragging = true;
+  local.dragMoved = false;
+  local.lastMouse = { x: e.clientX, y: e.clientY };
+});
+window.addEventListener('pointermove', (e) => {
+  if (!local.isDragging) return;
+  const dx = e.clientX - local.lastMouse.x;
+  const dy = e.clientY - local.lastMouse.y;
+  if (Math.hypot(dx, dy) > 4) local.dragMoved = true;
+  local.panX += dx;
+  local.panY += dy;
+  local.lastMouse = { x: e.clientX, y: e.clientY };
+  updateViewportTransform();
+});
+window.addEventListener('pointerup', () => { local.isDragging = false; });
+
+boardContainer.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  local.zoom = Math.min(2.4, Math.max(0.45, local.zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
+  updateViewportTransform();
+}, { passive: false });
+
+$('zoom-in-btn').onclick = () => { local.zoom = Math.min(2.4, local.zoom * 1.15); updateViewportTransform(); };
+$('zoom-out-btn').onclick = () => { local.zoom = Math.max(0.45, local.zoom * 0.85); updateViewportTransform(); };
+$('reset-view-btn').onclick = resetView;
+window.addEventListener('resize', updateViewportTransform);
+
+// 退出・モーダル
+$('close-result-btn').onclick = () => $('result-modal').classList.add('hidden');
+$('leave-btn').onclick = $('back-lobby-btn').onclick = () => location.reload();
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, m => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m]));
+}
