@@ -228,7 +228,7 @@
             <li>メインの道で<strong>8枚以上の輪</strong></li>
             <li>滝〜<strong>完成した池</strong>まで川が繋がる</li>
           </ul>
-          <p class="hint">※橋は空きマスにも、既存の「メイン直線」の上にも置けます（水色枠）。</p>
+          <p class="hint">※道・川・池は同じ種類が1辺以上繋がる場所にのみ置けます。橋は「メイン直線」の上にも置けます（水色枠）。</p>
         </div>
         <div id="action-log" class="log-box"></div>
       </aside>
@@ -408,7 +408,6 @@
       }
     };
 
-    /* 橋の6パターン (道3方向 × 川交差2方向) */
     const BRIDGE_VARIANTS = [
       { mainEdges: [0, 3], riverEdges: [1, 4] },
       { mainEdges: [0, 3], riverEdges: [2, 5] },
@@ -424,7 +423,7 @@
       sub_straight: 1, sub_curve: 1, sub_deadend: 1,
       bridge: 5,
       river_straight: 5, river_curve: 5, river_curve_sharp: 2,
-      pond_2_adj: 3, pond_1: 2, pond_1_river: 2, pond_2_adj_river: 1
+      pond_2_adj: 2, pond_1: 2, pond_1_river: 2, pond_2_adj_river: 2
     };
 
     function createShuffledDeck() {
@@ -491,7 +490,7 @@
       return edgeA === edgeB;
     }
 
-    /* 空きマスへの配置 または メイン直線への橋上書きを判定 */
+    /* 厳密一致 ＋ 少なくとも1辺で道・川・池のいずれかが繋がっている場合のみ配置可 */
     function canPlaceCard(board, q, r, type, rot) {
       const key = hexKey(q, r);
       const existing = board[key];
@@ -506,15 +505,15 @@
         }
       }
 
-      let hasNeighbor = false;
+      let hasFeatureConnection = false;
       for (let d = 0; d < 6; d++) {
         const neighbor = board[hexKey(q + DIRS[d][0], r + DIRS[d][1])];
         if (!neighbor) continue;
-        hasNeighbor = true;
         const nbEdges = getRotatedEdges(neighbor.type, neighbor.rot);
         if (!canEdgesConnect(myEdges[d], nbEdges[oppositeDir(d)])) return false;
+        if (myEdges[d] !== 'grass') hasFeatureConnection = true;
       }
-      return existing ? true : hasNeighbor;
+      return existing ? true : hasFeatureConnection;
     }
 
     function getCandidateCoords(board, type) {
@@ -648,7 +647,6 @@
       return { completedCount, completedPondKeys };
     }
 
-    /* 滝から途切れずに完成した池まで川が繋がっているか判定 */
     function detectRiverCompleted(board, completedPondKeys) {
       const waterfallKey = Object.keys(board).find(k => CARD_DEFS[board[k].type].isWaterfall);
       if (!waterfallKey) return false;
@@ -702,7 +700,6 @@
       const layers = [];
       layers.push(`<polygon points="${HEX_POINTS}" fill="#b7de8d" stroke="#76a34c" stroke-width="2" />`);
 
-      /* 橋は6パターンを直接描画 */
       if (def.isBridge) {
         const v = BRIDGE_VARIANTS[rot % 6];
         for (const d of v.riverEdges) {
